@@ -169,7 +169,7 @@ test "multi-threaded concurent push pop 1:1 cancel" {
     const allocator = testing.allocator;
     var queue = WorkQueue(u64).init();
     defer queue.deinit(allocator);
-    var poped_count = std.atomic.Value(usize).init(0);
+    var push_pop_count = std.atomic.Value(usize).init(0);
 
     const n_producers = 4;
     const n_consumers = 4;
@@ -177,30 +177,31 @@ test "multi-threaded concurent push pop 1:1 cancel" {
     var producers: [n_producers]Io.Future(QueueError!void) = undefined;
     for (&producers, 0..n_producers) |*p, k| {
         p.* = try io.concurrent(struct {
-            fn run(_queue: *WorkQueue(u64), id: usize) QueueError!void {
+            fn run(_queue: *WorkQueue(u64), _push_pop_count: *std.atomic.Value(usize), id: usize) QueueError!void {
                 for (0..std.math.maxInt(usize)) |j| {
                     _queue.push(allocator, io, id + j) catch |err| switch (err) {
                         error.Closed => return,
                         else => return err,
                     };
+                    _ = _push_pop_count.fetchAdd(1, .acq_rel);
                 }
             }
-        }.run, .{ &queue, k });
+        }.run, .{ &queue, &push_pop_count, k });
     }
 
     var consumers: [n_consumers]Io.Future(QueueError!void) = undefined;
     for (&consumers) |*c| {
         c.* = try io.concurrent(struct {
-            fn run(q: *WorkQueue(u64), _poped_count: *std.atomic.Value(usize)) QueueError!void {
+            fn run(q: *WorkQueue(u64), _push_pop_count: *std.atomic.Value(usize)) QueueError!void {
                 while (true) {
                     _ = q.waitPop(io) catch |err| switch (err) {
                         error.Closed => return,
                         else => return err,
                     };
-                    _ = _poped_count.fetchAdd(1, .monotonic);
+                    _ = _push_pop_count.fetchSub(1, .acq_rel);
                 }
             }
-        }.run, .{ &queue, &poped_count });
+        }.run, .{ &queue, &push_pop_count });
     }
 
     try io.sleep(.fromMilliseconds(100), .awake);
@@ -212,6 +213,7 @@ test "multi-threaded concurent push pop 1:1 cancel" {
     for (&consumers) |*c| {
         try c.await(io);
     }
+    try testing.expectEqual(0, push_pop_count.load(.monotonic));
 }
 
 test "multi-threaded concurent push pop 1:10" {
