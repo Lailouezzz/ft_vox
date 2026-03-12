@@ -41,6 +41,17 @@ pub fn WorkQueue(comptime T: type) type {
             self.not_empty.signal(io);
         }
 
+        pub fn pushFront(self: *Self, allocator: Allocator, io: Io, item: T) QueueError!void {
+            try self.mutex.lock(io);
+            defer self.mutex.unlock(io);
+
+            if (self.closed) return QueueError.Closed;
+
+            try self.deque.pushFront(allocator, item);
+
+            self.not_empty.signal(io);
+        }
+
         // Non blocking pop
         pub fn pop(self: *Self, io: Io) QueueError!?T {
             if (self.closed) return QueueError.Closed;
@@ -55,7 +66,7 @@ pub fn WorkQueue(comptime T: type) type {
             defer self.mutex.unlock(io);
             while (self.deque.len == 0) {
                 if (self.closed) return QueueError.Closed;
-                self.not_empty.waitUncancelable(io, &self.mutex);
+                try self.not_empty.wait(io, &self.mutex);
             }
             return self.deque.popFront() orelse unreachable;
         }
