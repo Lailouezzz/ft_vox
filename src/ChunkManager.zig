@@ -26,6 +26,9 @@ pub const Config = struct {
     unload_margin: u16 = 2,
     gen_workers: usize,
     mesh_workers: usize,
+    /// First meshes dispatched per `update` (each costs a 39 KB snapshot on the
+    /// main thread); the rest wait for the next frames. Edits are not limited.
+    max_mesh_dispatch: u16 = 64,
 };
 
 pub const Upload = struct { pos: ChunkPos, mesh: Mesh };
@@ -42,7 +45,7 @@ pub const Stats = struct {
 
 /// The sender allocates `chunk`; ownership travels with the job and comes back in the result.
 const GenJob = struct { id: u64, pos: ChunkPos, seed: u64, chunk: *Chunk };
-const GenResult = struct { id: u64, pos: ChunkPos, chunk: *Chunk };
+const GenResult = struct { id: u64, pos: ChunkPos, chunk: *Chunk, empty: bool };
 /// The mesh task owns and frees `volume`: nobody needs the snapshot afterwards.
 const MeshJob = struct { id: u64, pos: ChunkPos, version: u32, volume: *Volume };
 /// `mesh == null`: meshing failed (OOM), the chunk goes back to dirty.
@@ -61,6 +64,8 @@ const Entry = struct {
     version: u32 = 1,
     dirty: bool = true,
     mesh_in_flight: bool = false,
+    /// All air at load time (computed by the gen worker, not per frame).
+    empty: bool = false,
     displayed_version: u32 = 0,
 };
 
@@ -88,6 +93,9 @@ stats: Stats = .{},
 /// Heap-allocated because the pools keep pointers to the queues.
 /// `gpa` must be thread-safe: workers allocate and free with it.
 pub fn create(gpa: Allocator, io: Io, config: Config) !*ChunkManager {
+    // With no margin the radius + 1 ring would unload as soon as it loads, and
+    // chunks at the edge of the radius would never get their 6 neighbours.
+    std.debug.assert(config.unload_margin >= 1);
     const self = try gpa.create(ChunkManager);
     errdefer gpa.destroy(self);
     self.* = .{
@@ -119,7 +127,10 @@ pub fn destroy(self: *ChunkManager) void {
     self.gen_out.close(io);
     self.mesh_out.close(io);
     while (popClosed(GenResult, &self.gen_out, io)) |r| gpa.destroy(r.chunk);
-    while (popClosed(MeshResult, &self.mesh_out, io)) |r| if (r.mesh) |m| gpa.free(m.quads);
+    while (popClosed(MeshResult, &self.mesh_out, io)) |r| if (r.mesh) |m| {
+        var mesh = m;
+        mesh.deinit(gpa);
+    };
 
     self.gen_in.deinit(gpa);
     self.gen_out.deinit(gpa);
@@ -248,6 +259,7 @@ fn handleGenResult(self: *ChunkManager, r: GenResult) void {
     const e = self.entries.getPtr(r.pos) orelse return self.gpa.destroy(r.chunk);
     if (e.id != r.id) return self.gpa.destroy(r.chunk);
     e.state = .{ .generated = r.chunk };
+    e.empty = r.empty;
 }
 
 fn handleMeshResult(self: *ChunkManager, r: MeshResult) !void {
@@ -264,6 +276,8 @@ fn handleMeshResult(self: *ChunkManager, r: MeshResult) !void {
     if (e.id != r.id) return mesh.deinit(self.gpa);
     e.mesh_in_flight = false;
     if (r.version <= e.displayed_version) return mesh.deinit(self.gpa);
+    // On failure the mesh is dropped: remesh later instead of keeping a stale one.
+    errdefer e.dirty = true;
     try self.uploads.append(self.gpa, .{ .pos = r.pos, .mesh = mesh });
     e.displayed_version = r.version;
     self.stats.uploads += 1;
@@ -272,6 +286,7 @@ fn handleMeshResult(self: *ChunkManager, r: MeshResult) !void {
 fn dispatchMeshes(self: *ChunkManager) !void {
     const center = self.last_center orelse return;
     const r: i64 = self.config.radius;
+    var budget = self.config.max_mesh_dispatch;
     var it = self.entries.iterator();
     // ponytail: scans every entry each frame; keep a dirty list if it shows in a profile.
     next: while (it.next()) |kv| {
@@ -283,9 +298,11 @@ fn dispatchMeshes(self: *ChunkManager) !void {
             .generated => |c| c,
         };
         if (horizontalDist2(pos, center) > r * r) continue;
+        // Edits bypass the budget: the player is waiting on them.
+        if (e.version == 1 and budget == 0) continue;
         // Never displayed and empty: nothing to draw. Once displayed, an
         // emptied chunk still sends a 0-quad mesh so the renderer frees it.
-        if (e.displayed_version == 0 and chunk.isEmpty()) {
+        if (e.displayed_version == 0 and e.empty) {
             e.dirty = false;
             continue;
         }
@@ -306,6 +323,7 @@ fn dispatchMeshes(self: *ChunkManager) !void {
             try self.mesh_in.push(self.gpa, self.io, job);
         e.dirty = false;
         e.mesh_in_flight = true;
+        if (e.version == 1) budget -= 1;
         self.stats.mesh_in_flight += 1;
         self.stats.mesh_dispatched += 1;
     }
@@ -357,7 +375,7 @@ fn enqueueMissing(self: *ChunkManager, center: ChunkPos) !void {
         if (self.edited.get(pos)) |saved| {
             const chunk = try gpa.create(Chunk);
             chunk.* = saved.*;
-            self.entries.putAssumeCapacityNoClobber(pos, .{ .id = id, .state = .{ .generated = chunk } });
+            self.entries.putAssumeCapacityNoClobber(pos, .{ .id = id, .state = .{ .generated = chunk }, .empty = chunk.isEmpty() });
             continue;
         }
         const chunk = try gpa.create(Chunk);
@@ -392,7 +410,7 @@ fn unloadFar(self: *ChunkManager, center: [2]i32) !void {
 fn genTask(_: Allocator, _: Io, job: GenJob) anyerror!?GenResult {
     const generator: world.Generator = .init(job.seed);
     world.generate(&generator, job.pos, job.chunk);
-    return .{ .id = job.id, .pos = job.pos, .chunk = job.chunk };
+    return .{ .id = job.id, .pos = job.pos, .chunk = job.chunk, .empty = job.chunk.isEmpty() };
 }
 
 /// Never returns an error: the pool would drop the result and leak what it owns.
@@ -587,9 +605,12 @@ test "edited chunk survives unload and reload" {
 test "destroy with jobs still queued leaks nothing" {
     const cm = try createTest(.{ .seed = 7, .radius = 6, .gen_workers = 1, .mesh_workers = 1 });
     defer cm.destroy();
-    for (0..3) |_| {
+    // Pump until meshing has started, so both pools hold jobs at destroy time.
+    var i: usize = 0;
+    while (cm.stats.mesh_dispatched == 0 and i < 5000) : (i += 1) {
         try cm.update(blockPos(0, 0));
-        try testing.io.sleep(.fromMilliseconds(5), .awake);
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
     }
+    try testing.expect(cm.stats.mesh_dispatched > 0);
     try testing.expect(cm.stats.gen_queued > 0);
 }

@@ -181,10 +181,12 @@ pub fn WorkerPool(comptime InType: type, comptime OutType: type) type {
         fn spawnOne(self: *Self, allocator: Allocator, io: Io) !void {
             const id = self.workers.items.len;
             const worker = try allocator.create(Worker);
+            errdefer allocator.destroy(worker);
             worker.* = .empty;
             worker.id = id;
-            self.workers.appendAssumeCapacity(worker);
+            // Listed only once running: shutdown awaits every listed worker's future.
             worker.future = try io.concurrent(Worker.entry, .{ worker, allocator, io, self.in_queue, self.out_queue, self.task_fn });
+            self.workers.appendAssumeCapacity(worker);
         }
 
         fn cleanEnded(self: *Self, allocator: Allocator, io: Io) void {

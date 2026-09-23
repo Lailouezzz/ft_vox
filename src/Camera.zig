@@ -25,7 +25,7 @@ pub fn view(c: Camera) zm.Mat {
 }
 
 /// Infinite reverse-Z perspective for Vulkan (clip Y down, depth 1 at `near`, 0 at infinity).
-/// Depth test GREATER, clear depth 0.
+/// Depth test GREATER_OR_EQUAL, clear depth 0.
 pub fn projection(c: Camera, aspect: f32) zm.Mat {
     const f = 1 / @tan(c.fov_y / 2);
     return .{

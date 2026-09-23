@@ -45,24 +45,25 @@ pub const Mesh = struct {
 
 /// Builds the padded volume of `center`. Missing neighbors (null) count as air.
 /// Neighbor order follows `Face`: +X, -X, +Y, -Y, +Z, -Z.
+/// Runs on the main thread for every mesh job, so rows of 32 blocks are copied
+/// with memcpy wherever both layouts keep x contiguous.
 pub fn buildVolume(center: *const Chunk, neighbors: [6]?*const Chunk, out: *Volume) void {
     out.* = @splat(.air);
-    for (0..cs) |y| for (0..cs) |z| for (0..cs) |x| {
-        out[volumeIndex(x + 1, y + 1, z + 1)] = center.blocks[x + cs * z + cs * cs * y];
+    for (0..cs) |y| for (0..cs) |z| {
+        @memcpy(out[volumeIndex(1, y + 1, z + 1)..][0..cs], center.blocks[cs * z + cs * cs * y ..][0..cs]);
     };
-    for (0..cs) |a| for (0..cs) |b| {
-        const l = struct {
-            fn at(c: ?*const Chunk, x: usize, y: usize, z: usize) Block {
-                return if (c) |n| n.blocks[x + cs * z + cs * cs * y] else .air;
-            }
-        }.at;
-        // a, b run over the two axes of the shared face.
-        out[volumeIndex(padded - 1, a + 1, b + 1)] = l(neighbors[@intFromEnum(Face.pos_x)], 0, a, b);
-        out[volumeIndex(0, a + 1, b + 1)] = l(neighbors[@intFromEnum(Face.neg_x)], cs - 1, a, b);
-        out[volumeIndex(a + 1, padded - 1, b + 1)] = l(neighbors[@intFromEnum(Face.pos_y)], a, 0, b);
-        out[volumeIndex(a + 1, 0, b + 1)] = l(neighbors[@intFromEnum(Face.neg_y)], a, cs - 1, b);
-        out[volumeIndex(a + 1, b + 1, padded - 1)] = l(neighbors[@intFromEnum(Face.pos_z)], a, b, 0);
-        out[volumeIndex(a + 1, b + 1, 0)] = l(neighbors[@intFromEnum(Face.neg_z)], a, b, cs - 1);
+    // ±Y and ±Z faces: rows along x.
+    for (0..cs) |a| {
+        if (neighbors[@intFromEnum(Face.pos_y)]) |n| @memcpy(out[volumeIndex(1, padded - 1, a + 1)..][0..cs], n.blocks[cs * a ..][0..cs]);
+        if (neighbors[@intFromEnum(Face.neg_y)]) |n| @memcpy(out[volumeIndex(1, 0, a + 1)..][0..cs], n.blocks[cs * a + cs * cs * (cs - 1) ..][0..cs]);
+        if (neighbors[@intFromEnum(Face.pos_z)]) |n| @memcpy(out[volumeIndex(1, a + 1, padded - 1)..][0..cs], n.blocks[cs * cs * a ..][0..cs]);
+        if (neighbors[@intFromEnum(Face.neg_z)]) |n| @memcpy(out[volumeIndex(1, a + 1, 0)..][0..cs], n.blocks[cs * (cs - 1) + cs * cs * a ..][0..cs]);
+    }
+    // ±X faces: one block per row.
+    for (0..cs) |y| for (0..cs) |z| {
+        const i = cs * z + cs * cs * y;
+        if (neighbors[@intFromEnum(Face.pos_x)]) |n| out[volumeIndex(padded - 1, y + 1, z + 1)] = n.blocks[i];
+        if (neighbors[@intFromEnum(Face.neg_x)]) |n| out[volumeIndex(0, y + 1, z + 1)] = n.blocks[i + cs - 1];
     };
 }
 

@@ -33,8 +33,10 @@ pub fn main(init: std.process.Init) !void {
     var renderer: Renderer = try .init(gpa, &ctx, framebufferExtent(window));
     defer renderer.deinit();
 
-    const workers = @max(1, (std.Thread.getCpuCount() catch 2) - 1);
-    const chunks = try ChunkManager.create(gpa, io, .{ .seed = 42, .gen_workers = workers, .mesh_workers = workers });
+    // One core stays free for the render thread: oversubscribing starves it while loading.
+    const workers = @max(2, (std.Thread.getCpuCount() catch 3) - 1);
+    const mesh_workers = @max(1, workers / 3);
+    const chunks = try ChunkManager.create(gpa, io, .{ .seed = 42, .gen_workers = workers - mesh_workers, .mesh_workers = mesh_workers });
     defer chunks.destroy();
 
     var camera: Camera = .{};
