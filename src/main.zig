@@ -82,4 +82,5 @@ fn framebufferExtent(window: *glfw.Window) vk.Extent2D {
 test {
     _ = @import("Camera.zig");
     _ = @import("Sun.zig");
+    _ = @import("ChunkManager.zig");
 }
