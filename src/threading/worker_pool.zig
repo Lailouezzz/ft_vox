@@ -6,13 +6,15 @@ const testing = std.testing;
 const QueueError = @import("work_queue.zig").QueueError;
 const WorkQueue = @import("work_queue.zig").WorkQueue;
 
+const log = std.log.scoped(.worker_pool);
+
 pub fn WorkerPool(comptime InType: type, comptime OutType: type) type {
     return struct {
         const Self = @This();
         const TaskFn = *const fn (Allocator, Io, InType) anyerror!?OutType;
 
         const Worker = struct {
-            const WorkerState = enum(u8) {
+            const State = enum(u8) {
                 waiting,
                 working,
                 shutdown,
@@ -20,7 +22,7 @@ pub fn WorkerPool(comptime InType: type, comptime OutType: type) type {
             };
 
             future: Io.Future(anyerror!void),
-            state: std.atomic.Value(WorkerState),
+            state: std.atomic.Value(State),
             id: usize,
 
             pub const empty: Worker = .{
@@ -30,22 +32,22 @@ pub fn WorkerPool(comptime InType: type, comptime OutType: type) type {
             };
 
             pub fn await(self: *Worker, io: Io) !void {
-                errdefer |err| std.log.warn("await worker[{d}] error: {any}", .{ self.id, err });
-                std.log.info("awaiting worker[{d}]", .{self.id});
+                errdefer |err| log.warn("await worker[{d}] error: {any}", .{ self.id, err });
+                log.info("awaiting worker[{d}]", .{self.id});
                 try self.future.await(io);
             }
 
             pub fn cancel(self: *Worker, io: Io) !void {
                 errdefer |err| switch (err) {
                     error.Canceled => {},
-                    else => std.log.warn("cancel worker[{d}] error: {any}", .{ self.id, err }),
+                    else => log.warn("cancel worker[{d}] error: {any}", .{ self.id, err }),
                 };
-                std.log.info("canceling worker[{d}]", .{self.id});
+                log.info("canceling worker[{d}]", .{self.id});
                 try self.future.cancel(io);
             }
 
             fn entry(self: *Worker, allocator: Allocator, io: Io, in_queue: *WorkQueue(InType), out_queue: ?*WorkQueue(OutType), task_fn: TaskFn) anyerror!void {
-                std.log.info("worker[{d}] started", .{self.id});
+                log.info("worker[{d}] started", .{self.id});
                 defer self.state.store(.ended, .release);
                 while (true) {
                     if (self.state.cmpxchgStrong(.working, .waiting, .acq_rel, .acquire)) |actual| switch (actual) {
@@ -53,7 +55,7 @@ pub fn WorkerPool(comptime InType: type, comptime OutType: type) type {
                         .ended, .working => unreachable,
                         .waiting => {},
                     };
-                    std.log.debug("worker[{d}] wait pop", .{self.id});
+                    log.debug("worker[{d}] wait pop", .{self.id});
                     if (in_queue.waitPop(io)) |in| {
                         if (self.state.cmpxchgStrong(.waiting, .working, .acq_rel, .acquire)) |actual| switch (actual) {
                             .shutdown => {
@@ -61,7 +63,7 @@ pub fn WorkerPool(comptime InType: type, comptime OutType: type) type {
                             },
                             .working, .waiting, .ended => unreachable,
                         };
-                        std.log.debug("worker[{d}] working", .{self.id});
+                        log.debug("worker[{d}] working", .{self.id});
                         if (try task_fn(allocator, io, in)) |out| {
                             if (out_queue) |queue|
                                 try queue.push(allocator, io, out);
@@ -108,7 +110,7 @@ pub fn WorkerPool(comptime InType: type, comptime OutType: type) type {
             try self.update(allocator, io);
         }
 
-        // Blocking - Close the input queue
+        /// Blocking: closes the input queue and waits for workers to finish pending items.
         pub fn shutdown(self: *Self, allocator: Allocator, io: Io) void {
             self.in_queue.close(io);
             for (self.workers.items) |worker| {
@@ -123,7 +125,7 @@ pub fn WorkerPool(comptime InType: type, comptime OutType: type) type {
             self.ending_workers.clearAndFree(allocator);
         }
 
-        // Blocking - Close the input queue
+        /// Blocking: closes and drains the input queue, then cancels workers.
         pub fn cancel(self: *Self, allocator: Allocator, io: Io) void {
             self.in_queue.close(io);
             self.in_queue.drain(io);
@@ -139,11 +141,11 @@ pub fn WorkerPool(comptime InType: type, comptime OutType: type) type {
             self.ending_workers.clearAndFree(allocator);
         }
 
-        pub fn setThreadCount(self: *Self, worker_count: usize) void {
+        pub fn setWorkerCount(self: *Self, worker_count: usize) void {
             self.worker_count = worker_count;
         }
 
-        // Call it regulary to match worker_count
+        /// Call regularly to spawn or retire workers until `worker_count` is matched.
         pub fn update(self: *Self, allocator: Allocator, io: Io) !void {
             if (self.worker_count > self.workers.items.len) {
                 try self.workers.ensureTotalCapacity(allocator, self.worker_count);
@@ -152,13 +154,13 @@ pub fn WorkerPool(comptime InType: type, comptime OutType: type) type {
                 }
             } else if (self.worker_count < self.workers.items.len) {
                 for (self.worker_count..self.workers.items.len) |_| {
-                    var worker = self.workers.pop() orelse unreachable;
+                    const worker = self.workers.pop().?;
                     if (worker.state.swap(.shutdown, .acq_rel) == .ended) {
-                        std.log.warn("worker[{d}] was ended with: {any}", .{ worker.id, worker.cancel(io) });
+                        log.warn("worker[{d}] was ended with: {any}", .{ worker.id, worker.cancel(io) });
                         allocator.destroy(worker);
                         continue;
                     }
-                    std.log.info("shutdowning worker[{d}]", .{worker.id});
+                    log.info("shutting down worker[{d}]", .{worker.id});
                     try self.ending_workers.append(allocator, worker);
                 }
             }
@@ -167,7 +169,7 @@ pub fn WorkerPool(comptime InType: type, comptime OutType: type) type {
 
         fn spawnOne(self: *Self, allocator: Allocator, io: Io) !void {
             const id = self.workers.items.len;
-            var worker = try allocator.create(Worker);
+            const worker = try allocator.create(Worker);
             worker.* = .empty;
             worker.id = id;
             self.workers.appendAssumeCapacity(worker);
@@ -177,14 +179,14 @@ pub fn WorkerPool(comptime InType: type, comptime OutType: type) type {
         fn cleanEnded(self: *Self, allocator: Allocator, io: Io) void {
             var k: usize = 0;
             while (k < self.ending_workers.items.len) {
-                var worker = self.ending_workers.items[k];
+                const worker = self.ending_workers.items[k];
                 if (worker.state.load(.acquire) == .ended) {
-                    worker.await(io) catch |err| std.log.warn("worker[{d}] ended with error: {any}", .{ worker.id, err });
-                    std.log.debug("worker[{d}] removed from ending workers", .{worker.id});
+                    worker.await(io) catch |err| log.warn("worker[{d}] ended with error: {any}", .{ worker.id, err });
+                    log.debug("worker[{d}] removed from ending workers", .{worker.id});
                     allocator.destroy(worker);
                     _ = self.ending_workers.swapRemove(k);
                 } else {
-                    std.log.debug("worker[{d}] waiting in ending workers", .{worker.id});
+                    log.debug("worker[{d}] waiting in ending workers", .{worker.id});
                     k += 1;
                 }
             }
@@ -209,7 +211,6 @@ fn hardWorkCancelable(_: Allocator, io: Io, in: u64) anyerror!?u64 {
     return in + 1;
 }
 
-// 1ms job
 fn oneMsJobUncancelable(_: Allocator, io: Io, in: u64) anyerror!?u64 {
     const old_cancel_protect = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(old_cancel_protect);
@@ -220,9 +221,9 @@ fn oneMsJobUncancelable(_: Allocator, io: Io, in: u64) anyerror!?u64 {
 test "0 producer 1 consumer" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var in_queue = WorkQueue(u64).init();
+    var in_queue: WorkQueue(u64) = .empty;
     defer in_queue.deinit(allocator);
-    var out_queue = WorkQueue(u64).init();
+    var out_queue: WorkQueue(u64) = .empty;
     defer out_queue.deinit(allocator);
     var pool = WorkerPool(u64, u64).init(&in_queue, &out_queue, 1, adder);
     defer pool.deinit(allocator, io);
@@ -233,9 +234,9 @@ test "0 producer 1 consumer" {
 test "0 producer 1 consumer shutdown" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var in_queue = WorkQueue(u64).init();
+    var in_queue: WorkQueue(u64) = .empty;
     defer in_queue.deinit(allocator);
-    var out_queue = WorkQueue(u64).init();
+    var out_queue: WorkQueue(u64) = .empty;
     defer out_queue.deinit(allocator);
     var pool = WorkerPool(u64, u64).init(&in_queue, &out_queue, 1, adder);
     defer pool.deinit(allocator, io);
@@ -247,9 +248,9 @@ test "0 producer 1 consumer shutdown" {
 test "0 producer 1 consumer cancel" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var in_queue = WorkQueue(u64).init();
+    var in_queue: WorkQueue(u64) = .empty;
     defer in_queue.deinit(allocator);
-    var out_queue = WorkQueue(u64).init();
+    var out_queue: WorkQueue(u64) = .empty;
     defer out_queue.deinit(allocator);
     var pool = WorkerPool(u64, u64).init(&in_queue, &out_queue, 1, adder);
     defer pool.deinit(allocator, io);
@@ -261,9 +262,9 @@ test "0 producer 1 consumer cancel" {
 test "0 producer 5 consumer" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var in_queue = WorkQueue(u64).init();
+    var in_queue: WorkQueue(u64) = .empty;
     defer in_queue.deinit(allocator);
-    var out_queue = WorkQueue(u64).init();
+    var out_queue: WorkQueue(u64) = .empty;
     defer out_queue.deinit(allocator);
     var pool = WorkerPool(u64, u64).init(&in_queue, &out_queue, 5, adder);
     defer pool.deinit(allocator, io);
@@ -274,9 +275,9 @@ test "0 producer 5 consumer" {
 test "0 producer 5 consumer shutdown" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var in_queue = WorkQueue(u64).init();
+    var in_queue: WorkQueue(u64) = .empty;
     defer in_queue.deinit(allocator);
-    var out_queue = WorkQueue(u64).init();
+    var out_queue: WorkQueue(u64) = .empty;
     defer out_queue.deinit(allocator);
     var pool = WorkerPool(u64, u64).init(&in_queue, &out_queue, 5, adder);
     defer pool.deinit(allocator, io);
@@ -288,9 +289,9 @@ test "0 producer 5 consumer shutdown" {
 test "0 producer 5 consumer cancel" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var in_queue = WorkQueue(u64).init();
+    var in_queue: WorkQueue(u64) = .empty;
     defer in_queue.deinit(allocator);
-    var out_queue = WorkQueue(u64).init();
+    var out_queue: WorkQueue(u64) = .empty;
     defer out_queue.deinit(allocator);
     var pool = WorkerPool(u64, u64).init(&in_queue, &out_queue, 5, adder);
     defer pool.deinit(allocator, io);
@@ -302,12 +303,12 @@ test "0 producer 5 consumer cancel" {
 test "0 producer 1 consumer adder cancel (default queue 50 items)" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var in_queue = WorkQueue(u64).init();
+    var in_queue: WorkQueue(u64) = .empty;
     defer in_queue.deinit(allocator);
     for (0..50) |k| {
         try in_queue.push(allocator, io, k);
     }
-    var out_queue = WorkQueue(u64).init();
+    var out_queue: WorkQueue(u64) = .empty;
     defer out_queue.deinit(allocator);
     var pool = WorkerPool(u64, u64).init(&in_queue, &out_queue, 1, adder);
     defer pool.deinit(allocator, io);
@@ -319,12 +320,12 @@ test "0 producer 1 consumer adder cancel (default queue 50 items)" {
 test "0 producer 1 consumer one ms job cancelable cancel (default queue 50 items)" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var in_queue = WorkQueue(u64).init();
+    var in_queue: WorkQueue(u64) = .empty;
     defer in_queue.deinit(allocator);
     for (0..50) |k| {
         try in_queue.push(allocator, io, k);
     }
-    var out_queue = WorkQueue(u64).init();
+    var out_queue: WorkQueue(u64) = .empty;
     defer out_queue.deinit(allocator);
     var pool = WorkerPool(u64, u64).init(&in_queue, &out_queue, 1, hardWorkCancelable);
     defer pool.deinit(allocator, io);
@@ -336,12 +337,12 @@ test "0 producer 1 consumer one ms job cancelable cancel (default queue 50 items
 test "0 producer 1 consumer one ms job uncancelable cancel (default queue 50 items)" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var in_queue = WorkQueue(u64).init();
+    var in_queue: WorkQueue(u64) = .empty;
     defer in_queue.deinit(allocator);
     for (0..50) |k| {
         try in_queue.push(allocator, io, k);
     }
-    var out_queue = WorkQueue(u64).init();
+    var out_queue: WorkQueue(u64) = .empty;
     defer out_queue.deinit(allocator);
     var pool = WorkerPool(u64, u64).init(&in_queue, &out_queue, 1, oneMsJobUncancelable);
     defer pool.deinit(allocator, io);
@@ -353,12 +354,12 @@ test "0 producer 1 consumer one ms job uncancelable cancel (default queue 50 ite
 test "0 producer 1 consumer adder shutdown (default queue 50 items)" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var in_queue = WorkQueue(u64).init();
+    var in_queue: WorkQueue(u64) = .empty;
     defer in_queue.deinit(allocator);
     for (0..50) |k| {
         try in_queue.push(allocator, io, k);
     }
-    var out_queue = WorkQueue(u64).init();
+    var out_queue: WorkQueue(u64) = .empty;
     defer out_queue.deinit(allocator);
     var pool = WorkerPool(u64, u64).init(&in_queue, &out_queue, 1, adder);
     defer pool.deinit(allocator, io);
@@ -371,12 +372,12 @@ test "0 producer 1 consumer adder shutdown (default queue 50 items)" {
 test "0 producer 1 consumer one ms job cancelable shutdown (default queue 50 items)" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var in_queue = WorkQueue(u64).init();
+    var in_queue: WorkQueue(u64) = .empty;
     defer in_queue.deinit(allocator);
     for (0..50) |k| {
         try in_queue.push(allocator, io, k);
     }
-    var out_queue = WorkQueue(u64).init();
+    var out_queue: WorkQueue(u64) = .empty;
     defer out_queue.deinit(allocator);
     var pool = WorkerPool(u64, u64).init(&in_queue, &out_queue, 1, hardWorkCancelable);
     defer pool.deinit(allocator, io);
@@ -389,12 +390,12 @@ test "0 producer 1 consumer one ms job cancelable shutdown (default queue 50 ite
 test "0 producer 1 consumer one ms job uncancelable shutdown (default queue 50 items)" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var in_queue = WorkQueue(u64).init();
+    var in_queue: WorkQueue(u64) = .empty;
     defer in_queue.deinit(allocator);
     for (0..50) |k| {
         try in_queue.push(allocator, io, k);
     }
-    var out_queue = WorkQueue(u64).init();
+    var out_queue: WorkQueue(u64) = .empty;
     defer out_queue.deinit(allocator);
     var pool = WorkerPool(u64, u64).init(&in_queue, &out_queue, 1, oneMsJobUncancelable);
     defer pool.deinit(allocator, io);
@@ -407,12 +408,12 @@ test "0 producer 1 consumer one ms job uncancelable shutdown (default queue 50 i
 test "0 producer 10 consumer one ms job uncancelable shutdown (default queue 500 items)" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var in_queue = WorkQueue(u64).init();
+    var in_queue: WorkQueue(u64) = .empty;
     defer in_queue.deinit(allocator);
     for (0..500) |k| {
         try in_queue.push(allocator, io, k);
     }
-    var out_queue = WorkQueue(u64).init();
+    var out_queue: WorkQueue(u64) = .empty;
     defer out_queue.deinit(allocator);
     var pool = WorkerPool(u64, u64).init(&in_queue, &out_queue, 10, oneMsJobUncancelable);
     defer pool.deinit(allocator, io);
@@ -425,23 +426,23 @@ test "0 producer 10 consumer one ms job uncancelable shutdown (default queue 500
 test "0 producer 1->10 consumer one ms job uncancelable shutdown (default queue 200 items)" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var in_queue = WorkQueue(u64).init();
+    var in_queue: WorkQueue(u64) = .empty;
     defer in_queue.deinit(allocator);
     for (0..200) |k| {
         try in_queue.push(allocator, io, k);
     }
-    var out_queue = WorkQueue(u64).init();
+    var out_queue: WorkQueue(u64) = .empty;
     defer out_queue.deinit(allocator);
     var pool = WorkerPool(u64, u64).init(&in_queue, &out_queue, 1, oneMsJobUncancelable);
     defer pool.deinit(allocator, io);
     try pool.start(allocator, io);
-    try io.sleep(.fromMilliseconds(10), .awake); // 10 job done theoricaly
-    pool.setThreadCount(10);
+    try io.sleep(.fromMilliseconds(10), .awake); // 10 job done theoretically
+    pool.setWorkerCount(10);
     try pool.update(allocator, io);
-    try io.sleep(.fromMilliseconds(10), .awake); // 100 job done theoricaly
-    pool.setThreadCount(1);
+    try io.sleep(.fromMilliseconds(10), .awake); // 100 job done theoretically
+    pool.setWorkerCount(1);
     try pool.update(allocator, io);
-    try io.sleep(.fromMilliseconds(2), .awake); // 2 job done theoricaly
+    try io.sleep(.fromMilliseconds(2), .awake); // 2 job done theoretically
     try pool.update(allocator, io); // Clean up finished job
     pool.shutdown(allocator, io);
     try testing.expectEqual(200, out_queue.deque.len);
@@ -450,21 +451,21 @@ test "0 producer 1->10 consumer one ms job uncancelable shutdown (default queue 
 test "0 producer 1->10 consumer one ms job uncancelable shutdown with ending workers (default queue 200 items)" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var in_queue = WorkQueue(u64).init();
+    var in_queue: WorkQueue(u64) = .empty;
     defer in_queue.deinit(allocator);
     for (0..200) |k| {
         try in_queue.push(allocator, io, k);
     }
-    var out_queue = WorkQueue(u64).init();
+    var out_queue: WorkQueue(u64) = .empty;
     defer out_queue.deinit(allocator);
     var pool = WorkerPool(u64, u64).init(&in_queue, &out_queue, 1, oneMsJobUncancelable);
     defer pool.deinit(allocator, io);
     try pool.start(allocator, io);
-    try io.sleep(.fromMilliseconds(10), .awake); // 10 job done theoricaly
-    pool.setThreadCount(10);
+    try io.sleep(.fromMilliseconds(10), .awake); // 10 job done theoretically
+    pool.setWorkerCount(10);
     try pool.update(allocator, io);
-    try io.sleep(.fromMilliseconds(10), .awake); // 100 job done theoricaly
-    pool.setThreadCount(1);
+    try io.sleep(.fromMilliseconds(10), .awake); // 100 job done theoretically
+    pool.setWorkerCount(1);
     try pool.update(allocator, io);
     pool.shutdown(allocator, io);
     try testing.expectEqual(200, out_queue.deque.len);
@@ -473,15 +474,15 @@ test "0 producer 1->10 consumer one ms job uncancelable shutdown with ending wor
 test "0 producer 1->0 consumer adder shutdown with ending workers (default queue 0->1 items)" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var in_queue = WorkQueue(u64).init();
+    var in_queue: WorkQueue(u64) = .empty;
     defer in_queue.deinit(allocator);
-    var out_queue = WorkQueue(u64).init();
+    var out_queue: WorkQueue(u64) = .empty;
     defer out_queue.deinit(allocator);
     var pool = WorkerPool(u64, u64).init(&in_queue, &out_queue, 1, oneMsJobUncancelable);
     defer pool.deinit(allocator, io);
     try pool.start(allocator, io);
     try io.sleep(.fromMilliseconds(1), .awake);
-    pool.setThreadCount(0);
+    pool.setWorkerCount(0);
     try pool.update(allocator, io); // 1 ending worker
     try io.sleep(.fromMilliseconds(1), .awake);
     try in_queue.push(allocator, io, 2);
@@ -493,15 +494,15 @@ test "0 producer 1->0 consumer adder shutdown with ending workers (default queue
 test "0 producer 1->0 consumer adder (default queue 0->1 items)" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var in_queue = WorkQueue(u64).init();
+    var in_queue: WorkQueue(u64) = .empty;
     defer in_queue.deinit(allocator);
-    var out_queue = WorkQueue(u64).init();
+    var out_queue: WorkQueue(u64) = .empty;
     defer out_queue.deinit(allocator);
     var pool = WorkerPool(u64, u64).init(&in_queue, &out_queue, 1, oneMsJobUncancelable);
     defer pool.deinit(allocator, io);
     try pool.start(allocator, io);
     try io.sleep(.fromMilliseconds(1), .awake);
-    pool.setThreadCount(0);
+    pool.setWorkerCount(0);
     try pool.update(allocator, io); // 1 ending worker
     try io.sleep(.fromMilliseconds(1), .awake);
     try in_queue.push(allocator, io, 2);
@@ -515,9 +516,9 @@ test "0 producer 1->0 consumer adder (default queue 0->1 items)" {
 test "1 producer 10 consumer one ms job uncancelable shutdown (500 items)" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var in_queue = WorkQueue(u64).init();
+    var in_queue: WorkQueue(u64) = .empty;
     defer in_queue.deinit(allocator);
-    var out_queue = WorkQueue(u64).init();
+    var out_queue: WorkQueue(u64) = .empty;
     defer out_queue.deinit(allocator);
     var pool = WorkerPool(u64, u64).init(&in_queue, &out_queue, 10, oneMsJobUncancelable);
     defer pool.deinit(allocator, io);
@@ -538,11 +539,11 @@ test "1 producer 10 consumer one ms job uncancelable shutdown (500 items)" {
 test "10 producer 10 consumer one ms job uncancelable shutdown (500 items)" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var in_queue = WorkQueue(u64).init();
+    var in_queue: WorkQueue(u64) = .empty;
     defer in_queue.deinit(allocator);
-    var added_queue = WorkQueue(u64).init();
+    var added_queue: WorkQueue(u64) = .empty;
     defer added_queue.deinit(allocator);
-    var out_queue = WorkQueue(u64).init();
+    var out_queue: WorkQueue(u64) = .empty;
     defer out_queue.deinit(allocator);
     for (0..500) |k| {
         try in_queue.push(allocator, io, k);

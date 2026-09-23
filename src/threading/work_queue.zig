@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const testing = std.testing;
 
 pub const QueueError = error{
     Closed,
@@ -14,16 +15,14 @@ pub fn WorkQueue(comptime T: type) type {
         deque: std.Deque(T),
         mutex: Io.Mutex,
         closed: bool,
-        not_empty: std.Io.Condition,
+        not_empty: Io.Condition,
 
-        pub fn init() Self {
-            return .{
-                .deque = .empty,
-                .mutex = .init,
-                .closed = false,
-                .not_empty = .init,
-            };
-        }
+        pub const empty: Self = .{
+            .deque = .empty,
+            .mutex = .init,
+            .closed = false,
+            .not_empty = .init,
+        };
 
         pub fn deinit(self: *Self, allocator: Allocator) void {
             self.deque.deinit(allocator);
@@ -34,7 +33,7 @@ pub fn WorkQueue(comptime T: type) type {
             try self.mutex.lock(io);
             defer self.mutex.unlock(io);
 
-            if (self.closed) return QueueError.Closed;
+            if (self.closed) return error.Closed;
 
             try self.deque.pushBack(allocator, item);
 
@@ -45,30 +44,30 @@ pub fn WorkQueue(comptime T: type) type {
             try self.mutex.lock(io);
             defer self.mutex.unlock(io);
 
-            if (self.closed) return QueueError.Closed;
+            if (self.closed) return error.Closed;
 
             try self.deque.pushFront(allocator, item);
 
             self.not_empty.signal(io);
         }
 
-        // Non blocking pop
+        /// Non-blocking: returns null if the queue is empty or the lock is contended.
         pub fn pop(self: *Self, io: Io) QueueError!?T {
-            if (self.closed) return QueueError.Closed;
             if (!self.mutex.tryLock()) return null;
             defer self.mutex.unlock(io);
+            if (self.closed) return error.Closed;
             return self.deque.popFront();
         }
 
-        // Return null if WorkQueue closed
+        /// Blocks until an item is available. Returns error.Closed once closed and empty.
         pub fn waitPop(self: *Self, io: Io) QueueError!T {
             try self.mutex.lock(io);
             defer self.mutex.unlock(io);
             while (self.deque.len == 0) {
-                if (self.closed) return QueueError.Closed;
+                if (self.closed) return error.Closed;
                 try self.not_empty.wait(io, &self.mutex);
             }
-            return self.deque.popFront() orelse unreachable;
+            return self.deque.popFront().?;
         }
 
         pub fn close(self: *Self, io: Io) void {
@@ -90,13 +89,11 @@ pub fn WorkQueue(comptime T: type) type {
 // Tests
 // ---
 
-const testing = std.testing;
-
 test "1 thread 2 items" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var queue = WorkQueue(u64).init();
-    defer queue.deinit(testing.allocator);
+    var queue: WorkQueue(u64) = .empty;
+    defer queue.deinit(allocator);
 
     try queue.push(allocator, io, 42);
     try queue.push(allocator, io, 43);
@@ -108,7 +105,7 @@ test "1 thread 2 items" {
 test "drain" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var queue = WorkQueue(u64).init();
+    var queue: WorkQueue(u64) = .empty;
     defer queue.deinit(allocator);
 
     try queue.push(allocator, io, 42);
@@ -119,18 +116,18 @@ test "drain" {
 test "1 thread 0 items" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var queue = WorkQueue(u64).init();
+    var queue: WorkQueue(u64) = .empty;
     defer queue.deinit(allocator);
 
     try testing.expectEqual(null, queue.pop(io));
 }
 
-test "multi-threaded concurent push pop 1:1" {
+test "multi-threaded concurrent push pop 1:1" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var queue = WorkQueue(u64).init();
+    var queue: WorkQueue(u64) = .empty;
     defer queue.deinit(allocator);
-    var poped_count = std.atomic.Value(usize).init(0);
+    var popped_count = std.atomic.Value(usize).init(0);
 
     const n_producers = 4;
     const n_consumers = 4;
@@ -139,9 +136,9 @@ test "multi-threaded concurent push pop 1:1" {
     var producers: [n_producers]Io.Future(QueueError!void) = undefined;
     for (&producers, 0..n_producers) |*p, k| {
         p.* = try io.concurrent(struct {
-            fn run(_queue: *WorkQueue(u64), id: usize) QueueError!void {
+            fn run(q: *WorkQueue(u64), id: usize) QueueError!void {
                 for (0..items_per_producer) |j| {
-                    _queue.push(allocator, io, id * items_per_producer + j) catch |err| switch (err) {
+                    q.push(allocator, io, id * items_per_producer + j) catch |err| switch (err) {
                         error.Closed => return,
                         else => return err,
                     };
@@ -153,16 +150,16 @@ test "multi-threaded concurent push pop 1:1" {
     var consumers: [n_consumers]Io.Future(QueueError!void) = undefined;
     for (&consumers) |*c| {
         c.* = try io.concurrent(struct {
-            fn run(q: *WorkQueue(u64), _poped_count: *std.atomic.Value(usize)) QueueError!void {
+            fn run(q: *WorkQueue(u64), count: *std.atomic.Value(usize)) QueueError!void {
                 while (true) {
                     _ = q.waitPop(io) catch |err| switch (err) {
                         error.Closed => return,
                         else => return err,
                     };
-                    _ = _poped_count.fetchAdd(1, .monotonic);
+                    _ = count.fetchAdd(1, .monotonic);
                 }
             }
-        }.run, .{ &queue, &poped_count });
+        }.run, .{ &queue, &popped_count });
     }
 
     for (&producers) |*p| {
@@ -172,13 +169,13 @@ test "multi-threaded concurent push pop 1:1" {
     for (&consumers) |*c| {
         try c.await(io);
     }
-    try testing.expectEqual(items_per_producer * n_producers, poped_count.load(.acquire));
+    try testing.expectEqual(items_per_producer * n_producers, popped_count.load(.acquire));
 }
 
-test "multi-threaded concurent push pop 1:1 cancel" {
+test "multi-threaded concurrent push pop 1:1 cancel" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var queue = WorkQueue(u64).init();
+    var queue: WorkQueue(u64) = .empty;
     defer queue.deinit(allocator);
     var push_pop_count = std.atomic.Value(usize).init(0);
 
@@ -188,13 +185,13 @@ test "multi-threaded concurent push pop 1:1 cancel" {
     var producers: [n_producers]Io.Future(QueueError!void) = undefined;
     for (&producers, 0..n_producers) |*p, k| {
         p.* = try io.concurrent(struct {
-            fn run(_queue: *WorkQueue(u64), _push_pop_count: *std.atomic.Value(usize), id: usize) QueueError!void {
+            fn run(q: *WorkQueue(u64), count: *std.atomic.Value(usize), id: usize) QueueError!void {
                 for (0..std.math.maxInt(usize)) |j| {
-                    _queue.push(allocator, io, id + j) catch |err| switch (err) {
+                    q.push(allocator, io, id + j) catch |err| switch (err) {
                         error.Closed => return,
                         else => return err,
                     };
-                    _ = _push_pop_count.fetchAdd(1, .acq_rel);
+                    _ = count.fetchAdd(1, .acq_rel);
                 }
             }
         }.run, .{ &queue, &push_pop_count, k });
@@ -203,13 +200,13 @@ test "multi-threaded concurent push pop 1:1 cancel" {
     var consumers: [n_consumers]Io.Future(QueueError!void) = undefined;
     for (&consumers) |*c| {
         c.* = try io.concurrent(struct {
-            fn run(q: *WorkQueue(u64), _push_pop_count: *std.atomic.Value(usize)) QueueError!void {
+            fn run(q: *WorkQueue(u64), count: *std.atomic.Value(usize)) QueueError!void {
                 while (true) {
                     _ = q.waitPop(io) catch |err| switch (err) {
                         error.Closed => return,
                         else => return err,
                     };
-                    _ = _push_pop_count.fetchSub(1, .acq_rel);
+                    _ = count.fetchSub(1, .acq_rel);
                 }
             }
         }.run, .{ &queue, &push_pop_count });
@@ -227,12 +224,12 @@ test "multi-threaded concurent push pop 1:1 cancel" {
     try testing.expectEqual(0, push_pop_count.load(.monotonic));
 }
 
-test "multi-threaded concurent push pop 1:10" {
+test "multi-threaded concurrent push pop 1:10" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var queue = WorkQueue(u64).init();
+    var queue: WorkQueue(u64) = .empty;
     defer queue.deinit(allocator);
-    var poped_count = std.atomic.Value(usize).init(0);
+    var popped_count = std.atomic.Value(usize).init(0);
 
     const n_producers = 1;
     const n_consumers = 10;
@@ -241,9 +238,9 @@ test "multi-threaded concurent push pop 1:10" {
     var producers: [n_producers]Io.Future(QueueError!void) = undefined;
     for (&producers, 0..n_producers) |*p, k| {
         p.* = try io.concurrent(struct {
-            fn run(_queue: *WorkQueue(u64), id: usize) QueueError!void {
+            fn run(q: *WorkQueue(u64), id: usize) QueueError!void {
                 for (0..items_per_producer) |j| {
-                    _queue.push(allocator, io, id * items_per_producer + j) catch |err| switch (err) {
+                    q.push(allocator, io, id * items_per_producer + j) catch |err| switch (err) {
                         error.Closed => return,
                         else => return err,
                     };
@@ -255,16 +252,16 @@ test "multi-threaded concurent push pop 1:10" {
     var consumers: [n_consumers]Io.Future(QueueError!void) = undefined;
     for (&consumers) |*c| {
         c.* = try io.concurrent(struct {
-            fn run(q: *WorkQueue(u64), _poped_count: *std.atomic.Value(usize)) QueueError!void {
+            fn run(q: *WorkQueue(u64), count: *std.atomic.Value(usize)) QueueError!void {
                 while (true) {
                     _ = q.waitPop(io) catch |err| switch (err) {
                         error.Closed => return,
                         else => return err,
                     };
-                    _ = _poped_count.fetchAdd(1, .monotonic);
+                    _ = count.fetchAdd(1, .monotonic);
                 }
             }
-        }.run, .{ &queue, &poped_count });
+        }.run, .{ &queue, &popped_count });
     }
 
     for (&producers) |*p| {
@@ -274,13 +271,13 @@ test "multi-threaded concurent push pop 1:10" {
     for (&consumers) |*c| {
         try c.await(io);
     }
-    try testing.expectEqual(items_per_producer * n_producers, poped_count.load(.acquire));
+    try testing.expectEqual(items_per_producer * n_producers, popped_count.load(.acquire));
 }
 
-test "multi-threaded items concurent push drain" {
+test "multi-threaded items concurrent push drain" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var queue = WorkQueue(u64).init();
+    var queue: WorkQueue(u64) = .empty;
     defer queue.deinit(allocator);
     var pushed_count = std.atomic.Value(usize).init(0);
 
@@ -290,13 +287,13 @@ test "multi-threaded items concurent push drain" {
     var producers: [n_producers]Io.Future(QueueError!void) = undefined;
     for (&producers, 0..n_producers) |*p, k| {
         p.* = try io.concurrent(struct {
-            fn run(_queue: *WorkQueue(u64), id: usize, _pushed_count: *std.atomic.Value(usize)) QueueError!void {
+            fn run(q: *WorkQueue(u64), id: usize, count: *std.atomic.Value(usize)) QueueError!void {
                 for (0..items_per_producer) |j| {
-                    _queue.push(allocator, io, id * items_per_producer + j) catch |err| switch (err) {
+                    q.push(allocator, io, id * items_per_producer + j) catch |err| switch (err) {
                         error.Closed => return,
                         else => return err,
                     };
-                    _ = _pushed_count.fetchAdd(1, .monotonic);
+                    _ = count.fetchAdd(1, .monotonic);
                 }
             }
         }.run, .{ &queue, k, &pushed_count });
@@ -312,7 +309,7 @@ test "multi-threaded items concurent push drain" {
 test "close pop" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var queue = WorkQueue(u64).init();
+    var queue: WorkQueue(u64) = .empty;
     defer queue.deinit(allocator);
 
     try queue.push(allocator, io, 42);
@@ -324,7 +321,7 @@ test "close pop" {
 test "close push" {
     const io = testing.io;
     const allocator = testing.allocator;
-    var queue = WorkQueue(u64).init();
+    var queue: WorkQueue(u64) = .empty;
     defer queue.deinit(allocator);
 
     queue.close(io);
