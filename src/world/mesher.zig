@@ -341,6 +341,71 @@ test "greedy covers exactly the naive faces on random volumes" {
     }
 }
 
+/// Quads for `face`, as sorted into `m.quads` (grouped by `Face` order).
+fn quadsForFace(m: Mesh, face: Face) []Quad {
+    const f = @intFromEnum(face);
+    var start: usize = 0;
+    for (0..f) |i| start += m.counts[i];
+    return m.quads[start..][0..m.counts[f]];
+}
+
+test "quad width/height axis convention: strip along z pins ±X" {
+    var vol: Volume = @splat(.air);
+    setInner(&vol, 5, 5, 5, .stone);
+    setInner(&vol, 5, 5, 6, .stone);
+    setInner(&vol, 5, 5, 7, .stone);
+    var m = try mesh(testing.allocator, &vol);
+    defer m.deinit(testing.allocator);
+
+    for ([_]Face{ .pos_x, .neg_x }) |face| {
+        const qs = quadsForFace(m, face);
+        try testing.expectEqual(1, qs.len);
+        try testing.expectEqual(3, qs[0].w);
+        try testing.expectEqual(1, qs[0].h);
+        try testing.expectEqual(5, qs[0].x);
+        try testing.expectEqual(5, qs[0].y);
+        try testing.expectEqual(5, qs[0].z);
+    }
+}
+
+test "quad width/height axis convention: strip along x pins ±Y and ±Z" {
+    var vol: Volume = @splat(.air);
+    setInner(&vol, 5, 5, 5, .stone);
+    setInner(&vol, 6, 5, 5, .stone);
+    setInner(&vol, 7, 5, 5, .stone);
+    var m = try mesh(testing.allocator, &vol);
+    defer m.deinit(testing.allocator);
+
+    for ([_]Face{ .pos_y, .neg_y, .pos_z, .neg_z }) |face| {
+        const qs = quadsForFace(m, face);
+        try testing.expectEqual(1, qs.len);
+        try testing.expectEqual(3, qs[0].w);
+        try testing.expectEqual(1, qs[0].h);
+        try testing.expectEqual(5, qs[0].x);
+        try testing.expectEqual(5, qs[0].y);
+        try testing.expectEqual(5, qs[0].z);
+    }
+}
+
+test "quad width/height axis convention: strip along y pins ±X" {
+    var vol: Volume = @splat(.air);
+    setInner(&vol, 5, 5, 5, .stone);
+    setInner(&vol, 5, 6, 5, .stone);
+    setInner(&vol, 5, 7, 5, .stone);
+    var m = try mesh(testing.allocator, &vol);
+    defer m.deinit(testing.allocator);
+
+    for ([_]Face{ .pos_x, .neg_x }) |face| {
+        const qs = quadsForFace(m, face);
+        try testing.expectEqual(1, qs.len);
+        try testing.expectEqual(1, qs[0].w);
+        try testing.expectEqual(3, qs[0].h);
+        try testing.expectEqual(5, qs[0].x);
+        try testing.expectEqual(5, qs[0].y);
+        try testing.expectEqual(5, qs[0].z);
+    }
+}
+
 test "greedy merges on real terrain" {
     const terrain = @import("terrain.zig");
     const gpa = testing.allocator;
