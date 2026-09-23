@@ -11,6 +11,9 @@ const log = std.log.scoped(.worker_pool);
 pub fn WorkerPool(comptime InType: type, comptime OutType: type) type {
     return struct {
         const Self = @This();
+        /// Returning an error drops the input item and any memory it owns,
+        /// and produces no output. Tasks that must report failure should
+        /// catch the error and return a failure value in `OutType` instead.
         const TaskFn = *const fn (Allocator, Io, InType) anyerror!?OutType;
 
         const Worker = struct {
