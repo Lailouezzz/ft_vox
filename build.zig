@@ -83,4 +83,5 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.step("bench", "Benchmark the mesher (ReleaseFast)").dependOn(&b.addRunArtifact(bench).step);
+    test_step.dependOn(&bench.step); // compile only, don't run
 }
