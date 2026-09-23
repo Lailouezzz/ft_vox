@@ -84,10 +84,11 @@ const Scratch = struct {
     present: [block_count]bool,
 };
 
+threadlocal var scratch: Scratch = undefined;
+
 /// Binary greedy mesher.
 pub fn mesh(gpa: Allocator, vol: *const Volume) Allocator.Error!Mesh {
-    const s = try gpa.create(Scratch);
-    defer gpa.destroy(s);
+    const s = &scratch;
     s.present = @splat(false);
 
     // 1. One pass over the volume: set the block's bit in its column on each axis.
