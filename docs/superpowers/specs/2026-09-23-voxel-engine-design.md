@@ -6,7 +6,7 @@ Date : 2026-09-23 · Branche : `ai` · Zig 0.16.0
 
 Un moteur voxel vitrine, moderne et optimisé, en Zig et Vulkan 1.3 :
 monde infini généré procéduralement (relief, grottes, eau, plages, arbres),
-binary greedy meshing sur la `WorkerPool` existante, rendu piloté par le GPU
+binary greedy meshing sur deux `WorkerPool` (génération et maillage), rendu piloté par le GPU
 en un seul draw indirect, soleil avec cycle jour/nuit et cascaded shadow maps,
 casse de blocs avec remaillage regroupé.
 
@@ -110,8 +110,28 @@ Interfaces :
 
 ## Streaming et édition (ChunkManager)
 
-Une `WorkerPool(Job, Result)` unique, `Job = union { generate, mesh }`.
-Résultats lus sans bloquer avec `pop()` sur la file de sortie.
+Deux `WorkerPool` typées, reliées par le ChunkManager (4 files) :
+
+```
+ChunkPos ─gen_in─► GenPool ─gen_out─► ChunkManager ─mesh_in─► MeshPool ─mesh_out─► ChunkManager ─► GPU
+                                      (6 voisins prêts,   ▲
+                                       snapshot 34³)      └─ breakBlock : pushFront
+```
+
+- `GenPool = WorkerPool(GenJob, GenResult)` : `GenJob = { id, pos, seed }`,
+  `GenResult = { id, pos, chunk: *Chunk }`.
+- `MeshPool = WorkerPool(MeshJob, MeshResult)` : `MeshJob = { id, pos,
+  version, volume: *[34³]Block }`, `MeshResult = { id, pos, version,
+  quads, ranges: [6] }`.
+- Pas de pipe direct : un chunk généré ne peut être maillé qu'une fois ses
+  6 voisins générés, c'est le ChunkManager (thread principal) qui fait le
+  lien.
+- Les deux pools sont surdimensionnées (`max(1, cœurs - 1)` workers
+  chacune) : un worker inactif dort dans `waitPop`, donc une pool seule
+  occupe tous les cœurs, et un remaillage n'attend jamais une génération.
+- Les buffers des jobs (chunk, volume, quads) sont alloués par l'émetteur
+  et libérés par le ChunkManager à la réception.
+- Résultats lus sans bloquer avec `pop()` sur `gen_out` et `mesh_out`.
 
 Par chunk (`HashMap(ChunkPos, Entry)`) :
 - état `generating → generated → meshing → ready` ;
@@ -127,7 +147,8 @@ Chaque frame :
    hors de `[0, 8)` en Y comptent comme de l'air).
 3. Pour chaque chunk `dirty` et pas `mesh_in_flight` : copie du volume 34³
    (39 Ko) dans le job, `dirty = false`, `mesh_in_flight = true`.
-   Les jobs d'édition passent devant avec `pushFront`.
+   Les remaillages après édition passent devant dans `mesh_in` avec
+   `pushFront`.
 4. Résultats : un mesh plus récent que `displayed_version` est envoyé au
    GPU, sinon il est jeté. `mesh_in_flight = false`. Résultat d'un `id`
    inconnu : jeté.
@@ -180,7 +201,9 @@ Contrôles : vol libre, ZQSD + souris, Shift pour accélérer, Échap quitte.
 - Erreur Vulkan : remontée jusqu'à `main`, log, sortie propre.
 - `OUT_OF_DATE` / `SUBOPTIMAL` : recréation de la swapchain.
 - Buffer de quads plein : log, plus de nouveaux chunks chargés, pas de crash.
-- Erreur dans un worker (OOM) : log, le chunk est relancé plus tard.
+- Erreur dans un worker (OOM) : log, le job est relancé plus tard.
+- Fermeture : `shutdown` de la GenPool puis de la MeshPool, les résultats
+  restants sont libérés.
 
 ## Tests (`zig build test`, sans GPU)
 
@@ -193,7 +216,7 @@ Contrôles : vol libre, ZQSD + souris, Shift pour accélérer, Échap quitte.
   couvertes par les quads = les faces d'un mesher naïf de référence.
 - raycast : axes, diagonales, négatifs, portée max.
 - FreeList : alloc, free, fusion de voisins, plein.
-- ChunkManager : ensemble voulu, transitions d'état, hystérésis, priorité ;
+- ChunkManager : ensemble voulu, transitions d'état, hystérésis, priorité des remaillages dans `mesh_in` ;
   N éditions pendant un maillage → 1 remaillage ; résultat dépassé envoyé
   s'il est plus récent que l'affiché, jeté sinon ; bordure marque le
   voisin ; chunk édité déchargé puis rechargé garde ses modifications.
