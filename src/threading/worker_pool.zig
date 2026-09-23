@@ -1,8 +1,10 @@
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
-const WorkQueue = @import("work_queue.zig").WorkQueue;
+const testing = std.testing;
+
 const QueueError = @import("work_queue.zig").QueueError;
+const WorkQueue = @import("work_queue.zig").WorkQueue;
 
 pub fn WorkerPool(comptime InType: type, comptime OutType: type) type {
     return struct {
@@ -66,7 +68,7 @@ pub fn WorkerPool(comptime InType: type, comptime OutType: type) type {
                         }
                     } else |err| switch (err) {
                         error.Closed => break,
-                        else => |err| return err,
+                        else => return err,
                     }
                 }
             }
@@ -193,8 +195,6 @@ pub fn WorkerPool(comptime InType: type, comptime OutType: type) type {
 // ---
 // Tests
 // ---
-
-const testing = std.testing;
 
 fn adder(_: Allocator, _: Io, in: u64) anyerror!?u64 {
     return in + 1;
