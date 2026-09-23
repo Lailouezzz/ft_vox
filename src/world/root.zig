@@ -8,6 +8,8 @@ pub const LocalPos = coords.LocalPos;
 pub const Face = coords.Face;
 pub const chunk_size = coords.chunk_size;
 pub const height_chunks = coords.height_chunks;
+pub const raycast = @import("raycast.zig").raycast;
+pub const Hit = @import("raycast.zig").Hit;
 
 pub const terrain = @import("terrain.zig");
 pub const Generator = terrain.Generator;
@@ -18,4 +20,5 @@ test {
     _ = @import("coords.zig");
     _ = @import("Chunk.zig");
     _ = @import("terrain.zig");
+    _ = @import("raycast.zig");
 }
