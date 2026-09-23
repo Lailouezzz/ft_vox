@@ -2,9 +2,30 @@
 
 Date : 2026-09-23 · Branche : `ai` · Zig 0.16.0
 
+## Révisions
+
+- **r2 (2026-09-23)** — après le cœur CPU (jalons 0–2) et les prototypes
+  Vulkan / ChunkManager :
+  - vulkan-zig passe sur la branche `zig-0.16-compat` (la version épinglée
+    vise Zig 0.17-dev et ne compile pas avec 0.16.0) ;
+  - cible Vulkan **1.4** (GPU de dev : AMD Radeon Renoir intégré, RADV,
+    Vulkan 1.4, pas de mesh shaders) ; SPIR-V passé aux pipelines via
+    maintenance5, sans `VkShaderModule` ;
+  - aucun descriptor pour la géométrie : tous les buffers passent par leur
+    adresse (buffer device address) dans les push constants, dont un
+    buffer `FrameData` par frame en vol ;
+  - projection perspective infinie en reverse-Z ;
+  - métadonnées de chunks mises à jour par `vkCmdUpdateBuffer` dans le
+    command buffer (pas d'écriture CPU pendant qu'une frame en vol les lit) ;
+  - API du ChunkManager alignée sur le prototype (voir la section
+    Streaming) ;
+  - `FreeList` : une plage de longueur 0 est une opération nulle (meshes
+    vides) ; contrat d'erreur de `WorkerPool.TaskFn` documenté ;
+  - mesher : mémoire de travail réutilisée par thread (`threadlocal`).
+
 ## Objectif
 
-Un moteur voxel vitrine, moderne et optimisé, en Zig et Vulkan 1.3 :
+Un moteur voxel vitrine, moderne et optimisé, en Zig et Vulkan 1.4 :
 monde infini généré procéduralement (relief, grottes, eau, plages, arbres),
 binary greedy meshing sur deux `WorkerPool` (génération et maillage), rendu piloté par le GPU
 en un seul draw indirect, soleil avec cycle jour/nuit et cascaded shadow maps,
@@ -16,13 +37,17 @@ en Zig (backend SPIR-V de Zig 0.16 insuffisant, testé).
 
 ## Contraintes et environnement
 
-- Zig 0.16.0, dépendances existantes : `vulkan-zig` + `vulkan_headers`,
-  `zglfw` (`import_vulkan = true`), `zmath`, `znoise`.
+- Zig 0.16.0, dépendances : `vulkan-zig` (branche `zig-0.16-compat`,
+  commit `b496a6a`) + `vulkan_headers`, `zglfw` (`import_vulkan = true`),
+  `zmath`, `znoise` (la lib C FastNoiseLite est liée au module `world`).
 - Shaders GLSL compilés en SPIR-V par `glslc` (système) via
   `b.addSystemCommand`, embarqués avec `@embedFile`.
-- Vulkan 1.3 requis avec : dynamic rendering, synchronization2,
-  buffer device address, `drawIndirectCount`. Sinon : arrêt avec un message
-  qui nomme la fonctionnalité manquante.
+- Vulkan 1.4 requis avec : dynamic rendering, synchronization2,
+  maintenance4/5, push descriptors, buffer device address, scalar block
+  layout, timeline semaphores, `drawIndirectCount`, `multiDrawIndirect`,
+  `drawIndirectFirstInstance`, `shaderInt64`, `depthClamp`. Sinon : le GPU
+  est ignoré avec un log qui nomme la fonctionnalité manquante, et le
+  programme s'arrête si aucun GPU ne convient.
 - Validation layers activées en Debug si présentes.
 
 ## Architecture
@@ -43,10 +68,17 @@ src/
     raycast.zig         DDA Amanatides & Woo
     FreeList.zig        allocateur de plages (utilisé par le renderer)
   render/
-    Context.zig         instance, device, queue, swapchain
-    Renderer.zig        frames, passes, buffers, upload
-    shaders/            cull.comp, chunk.vert/.frag, shadow.vert,
-                        sky.vert/.frag, outline.vert/.frag
+    Context.zig         instance, messenger de debug, surface, device, queue
+    Swapchain.zig       swapchain, vues, sémaphores par image
+    Buffer.zig          buffer + mémoire + adresse + mapping
+    Image.zig           image + mémoire + vue
+    pipeline.zig        création de pipelines (maintenance5), layouts
+    gpu.zig             miroirs CPU des structures GPU, plans du frustum
+    ChunkBuffers.zig    quads, métadonnées, slots, uploads, libérations différées
+    Renderer.zig        frames en vol, passes (culling, ombres, scène, ciel)
+    shaders/            common.glsl, gpu.glsl, cull.comp, chunk.vert/.frag,
+                        shadow.vert, fullscreen.vert, sky.frag,
+                        outline.vert/.frag
 ```
 
 Modules `build.zig` :
@@ -64,8 +96,9 @@ Interfaces :
   bloc à une position monde (`Hit` = bloc touché + face d'entrée).
 - `ChunkManager` : `update(camera_pos)`, `breakBlock(world_pos)`,
   `takeUploads()`, `takeFrees()`. Aucun appel Vulkan.
-- `Renderer` : `upload(chunk_id, quads) !Allocation`, `free(Allocation)`,
-  `drawFrame(camera, time_of_day, target: ?BlockPos)`.
+- `Renderer` : `upload(pos, mesh) !void`, `remove(pos)`,
+  `drawFrame(extent, FrameInput) !void` (`FrameInput` : caméra, soleil,
+  bloc visé).
 
 ## Données du monde
 
@@ -115,68 +148,99 @@ Deux `WorkerPool` typées, reliées par le ChunkManager (4 files) :
 ```
 ChunkPos ─gen_in─► GenPool ─gen_out─► ChunkManager ─mesh_in─► MeshPool ─mesh_out─► ChunkManager ─► GPU
                                       (6 voisins prêts,   ▲
-                                       snapshot 34³)      └─ breakBlock : pushFront
+                                       snapshot 34³)      └─ remaillage après édition : pushFront
 ```
 
-- `GenPool = WorkerPool(GenJob, GenResult)` : `GenJob = { id, pos, seed }`,
-  `GenResult = { id, pos, chunk: ?*Chunk }` (`null` = échec, job relancé).
+- `GenPool = WorkerPool(GenJob, GenResult)` : `GenJob = { id, pos, seed,
+  chunk: *Chunk }` (le chunk est alloué par l'émetteur), `GenResult = { id,
+  pos, chunk: *Chunk }`. La génération ne peut pas échouer.
 - `MeshPool = WorkerPool(MeshJob, MeshResult)` : `MeshJob = { id, pos,
-  version, volume: *[34³]Block }`, `MeshResult = { id, pos, version,
-  quads, ranges: [6], failed: bool }` (échec = remaillage relancé).
+  version, volume: *Volume }`, `MeshResult = { id, pos, version, mesh:
+  ?Mesh }` (`null` = échec, le chunk redevient `dirty`). La tâche attrape
+  ses erreurs (une erreur renvoyée ferait perdre l'item) et libère elle-même
+  le volume.
 - Pas de pipe direct : un chunk généré ne peut être maillé qu'une fois ses
   6 voisins générés, c'est le ChunkManager (thread principal) qui fait le
   lien.
-- Les deux pools sont surdimensionnées (`max(1, cœurs - 1)` workers
-  chacune) : un worker inactif dort dans `waitPop`, donc une pool seule
-  occupe tous les cœurs, et un remaillage n'attend jamais une génération.
-- Les buffers des jobs (chunk, volume, quads) sont alloués par l'émetteur
-  et libérés par le ChunkManager à la réception.
+- Nombre de workers de chaque pool fourni par l'appelant via `Config`
+  (`max(1, cœurs - 1)` chacune dans `main`) : un worker inactif dort dans
+  `waitPop`, donc une pool seule occupe tous les cœurs.
 - Résultats lus sans bloquer avec `pop()` sur `gen_out` et `mesh_out`.
 
-Par chunk (`HashMap(ChunkPos, Entry)`) :
-- état `generating → generated → meshing → ready` ;
-- `id` unique (détecte un résultat pour un chunk déchargé puis rechargé) ;
-- `version: u32` (incrémenté à chaque édition), `dirty`, `mesh_in_flight`,
-  `displayed_version`, allocation GPU courante.
+API : `create(gpa, io, Config) !*ChunkManager` / `destroy()`,
+`update(center: BlockPos) !void`, `takeUploads() []const Upload`
+(`Upload = { pos, mesh }`), `takeUnloads() []const ChunkPos` (listes
+valides jusqu'au prochain `update`, les meshes sont libérés par le
+ChunkManager), `breakBlock(pos) !bool`, `blockAt(pos) Block` (le
+ChunkManager sert de `lookup` au raycast), `stats`. Le renderer applique les
+uploads avant les unloads (une même position peut apparaître dans les deux
+la même frame). `Config = { seed, radius = 16, unload_margin = 2,
+gen_workers, mesh_workers }` ; rayon euclidien horizontal en chunks.
 
-Chaque frame :
-1. Calcul de l'ensemble voulu : rayon horizontal réglable (16 par défaut),
-   trié du plus proche au plus loin. Générations manquantes lancées
-   (chunks édités rechargés depuis la table des chunks édités).
-2. Un chunk est `dirty` dès que ses 6 voisins sont générés (les voisins
-   hors de `[0, 8)` en Y comptent comme de l'air).
-3. Pour chaque chunk `dirty` et pas `mesh_in_flight` : copie du volume 34³
-   (39 Ko) dans le job, `dirty = false`, `mesh_in_flight = true`.
-   Les remaillages après édition passent devant dans `mesh_in` avec
-   `pushFront`.
-4. Résultats : un mesh plus récent que `displayed_version` est envoyé au
-   GPU, sinon il est jeté. `mesh_in_flight = false`. Résultat d'un `id`
-   inconnu : jeté.
-5. Déchargement au-delà du rayon + 2. Allocation GPU libérée après que
-   les frames en vol ne l'utilisent plus.
+Par chunk (`HashMap(ChunkPos, Entry)`) :
+- état `generating` ou `generated: *Chunk` ;
+- `id` unique (détecte un résultat pour un chunk déchargé puis rechargé) ;
+- `version: u32` (commence à 1, incrémentée à chaque édition), `dirty`,
+  `mesh_in_flight`, `displayed_version` (0 = rien d'affiché). Pas
+  d'allocation GPU : le renderer indexe ses allocations par `ChunkPos`.
+
+Chaque `update` :
+1. Libère les uploads/unloads de la frame précédente.
+2. Résultats : un mesh plus récent que `displayed_version` devient un
+   upload, sinon il est libéré ; `id` inconnu : libéré ;
+   `mesh_in_flight = false`.
+3. Pour chaque chunk `dirty`, pas `mesh_in_flight`, dans le rayon et dont
+   les 6 voisins sont générés (hors de `[0, 8)` en Y = air) : copie du
+   volume 34³ (39 Ko) dans le job, `dirty = false`, `mesh_in_flight = true`.
+   Les chunks entièrement vides ne sont pas maillés. Remaillage après
+   édition (`version > 1`) en tête de `mesh_in`, premier maillage en queue.
+4. Quand la colonne centrale change : génération des chunks manquants de
+   l'anneau rayon + 1, du plus proche au plus loin (chunks édités restaurés
+   depuis la table des chunks édités), puis déchargement au-delà de
+   rayon + `unload_margin`.
 
 Édition : `breakBlock` (thread principal seulement) met le bloc à `air`,
 `version += 1`, `dirty = true`, et marque le voisin de face si la coordonnée
-locale est 0 ou 31. Le chunk est copié dans la table des chunks édités.
+locale est 0 ou 31. Renvoie `!bool` : l'ajout à la table des chunks édités
+peut manquer de mémoire, et il est fait avant de modifier le bloc. Le chunk est copié dans la table des chunks édités.
 Garantie : au plus un maillage en cours et un en attente par chunk, donc
 N éditions pendant un maillage → exactement un remaillage.
 Limite connue : la table des chunks édités grossit sans fin.
 
-## Rendu (Vulkan 1.3)
+## Rendu (Vulkan 1.4)
 
-Frames : 2 en vol, swapchain recréée sur resize / `OUT_OF_DATE` /
-`SUBOPTIMAL`.
+Frames : 2 en vol ; un sémaphore « rendu terminé » par image de la
+swapchain ; swapchain recréée sur resize / `OUT_OF_DATE` / `SUBOPTIMAL` ;
+mode de présentation mailbox si disponible, sinon FIFO.
 
-Géométrie pilotée par le GPU :
-1. Buffer de quads de 256 Mo (device local), découpé par `FreeList`.
-   Uploads via un staging buffer par frame en vol.
-2. Buffer de métadonnées par chunk : origine + (début, taille) × 6 plages.
-3. `cull.comp`, une invocation par chunk : frustum culling + élimination
-   des directions de face invisibles depuis le point de vue. Écrit des
-   `VkDrawIndirectCommand` avec un compteur atomique.
-4. Un `vkCmdDrawIndirectCount` pour tout le monde.
-5. `chunk.vert` lit les quads via une adresse de buffer (push constant),
+Caméra : perspective infinie en reverse-Z (profondeur 1 au plan proche, 0 à
+l'infini, test `GREATER_OR_EQUAL`, clear à 0) ; matrices zmath en
+convention vecteur-ligne, dont la disposition mémoire est celle attendue
+par `mat4 * vec4` en GLSL.
+
+Pipelines : dynamic rendering, SPIR-V passé directement aux étages via
+maintenance5 (pas de `VkShaderModule`), viewport/scissor dynamiques.
+
+Géométrie pilotée par le GPU, sans descriptor :
+1. Buffer de quads de 128 Mo (device local, 16 M quads), découpé par
+   `FreeList`. Uploads via un staging buffer par frame en vol ; ce qui ne
+   tient pas dans le budget de la frame est copié et reporté.
+2. Buffer de métadonnées (`ChunkMeta` : origine, premier quad, 6 comptes,
+   actif) indexé par slot, 16 384 slots ; mis à jour par
+   `vkCmdUpdateBuffer` dans le command buffer de la frame. Slots et plages
+   libérés seulement quand plus aucune frame en vol ne les utilise.
+3. `FrameData` par frame en vol (host visible) : view-proj, plans du
+   frustum, position caméra, soleil, ambiance, brouillard, palette des
+   blocs (source unique : `Block.color`), capacité.
+4. `cull.comp`, une invocation par slot : frustum culling + élimination des
+   directions de face invisibles depuis le point de vue ; écrit des
+   `VkDrawIndirectCommand` (`firstInstance = slot·8 + face`) avec un
+   compteur atomique.
+5. Un `vkCmdDrawIndirectCount` pour tout le monde.
+6. `chunk.vert` lit quads et métadonnées par adresse de buffer et
    reconstruit les 6 sommets depuis `gl_VertexIndex`.
+7. Push constants communs aux pipelines de chunks : adresses de
+   `FrameData`, métadonnées, quads, commandes indirectes, compteur.
 
 Soleil et ombres :
 - 3 cascades, chacune culled et dessinée par le même chemin indirect avec
@@ -237,10 +301,16 @@ Chacun compile, passe ses tests, et fait l'objet d'un commit.
 1. `world` : blocs, chunk, génération (relief, grottes, eau, arbres),
    raycast, FreeList + tests.
 2. `mesher` : binary greedy meshing + tests + bench.
-3. Bootstrap Vulkan 1.3 : fenêtre, device, swapchain, dynamic rendering,
-   ciel.
-4. Chunks à l'écran : buffer de quads, vertex pulling, caméra, ChunkManager.
-5. Culling GPU + `drawIndirectCount`.
+3. Bootstrap Vulkan 1.4 : passage de vulkan-zig sur `zig-0.16-compat`,
+   compilation des shaders, fenêtre, contexte, swapchain, dynamic
+   rendering, caméra reverse-Z, ciel.
+4. ChunkManager : deux pools, streaming, édition, tests (CPU, sans GPU ;
+   peut avancer en parallèle du jalon 3).
+5. Chunks à l'écran, pilotés par le GPU : `ChunkBuffers`, `FrameData`,
+   `cull.comp` + `drawIndirectCount`, vertex pulling, éclairage soleil +
+   ambiance, brouillard, tone mapping, contrôles caméra, branchement du
+   ChunkManager.
 6. Cascaded shadow maps + cycle jour/nuit.
-7. Finitions : brouillard, tone mapping, stats dans le titre.
+7. Finitions : stats dans le titre, réglages de qualité pour iGPU
+   (distance de rendu, résolution des ombres) en arguments.
 8. Casse de blocs : raycast caméra, contour, remaillage regroupé.
