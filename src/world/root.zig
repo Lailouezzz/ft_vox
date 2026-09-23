@@ -22,4 +22,5 @@ test {
     _ = @import("terrain.zig");
     _ = @import("raycast.zig");
     _ = @import("FreeList.zig");
+    _ = @import("trees.zig");
 }

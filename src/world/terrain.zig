@@ -4,6 +4,7 @@ const Block = @import("block.zig").Block;
 const Chunk = @import("Chunk.zig");
 const coords = @import("coords.zig");
 const ChunkPos = coords.ChunkPos;
+const trees = @import("trees.zig");
 
 pub const sea_level = 62;
 /// Surfaces at or below this height become sand (beaches, sea floor).
@@ -71,6 +72,7 @@ pub fn generate(g: *const Generator, pos: ChunkPos, out: *Chunk) void {
         fillColumns(origin, &heights, out);
         carveCaves(g, origin, &heights, out);
     }
+    trees.place(g, pos, out);
 }
 
 fn fillColumns(origin: coords.BlockPos, heights: *const [Chunk.size][Chunk.size]i32, out: *Chunk) void {
