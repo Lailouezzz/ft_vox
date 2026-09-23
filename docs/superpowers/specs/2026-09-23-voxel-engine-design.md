@@ -71,7 +71,7 @@ Interfaces :
 
 - `Block = enum(u8) { air, grass, dirt, stone, sand, water, log, leaves }`.
 - `Chunk` : `blocks: [32768]Block` (32 Ko), index `x + 32·z + 1024·y`,
-  drapeau `empty` (tout air → pas de maillage).
+  méthode `isEmpty()` (tout air → pas de maillage).
 - `ChunkPos { x, y, z: i32 }`. Monde → chunk : `>> 5`, local : `& 31`
   (décalage arithmétique, correct en négatif).
 - Monde infini en X/Z, `cy ∈ [0, 8)` (256 blocs de haut).
