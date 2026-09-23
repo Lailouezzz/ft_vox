@@ -14,6 +14,7 @@ pub const generate = terrain.generate;
 pub const raycast = @import("raycast.zig").raycast;
 pub const Hit = @import("raycast.zig").Hit;
 pub const FreeList = @import("FreeList.zig");
+pub const mesher = @import("mesher.zig");
 
 test {
     _ = @import("block.zig");
@@ -23,4 +24,5 @@ test {
     _ = @import("raycast.zig");
     _ = @import("FreeList.zig");
     _ = @import("trees.zig");
+    _ = @import("mesher.zig");
 }
