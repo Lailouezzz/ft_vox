@@ -25,9 +25,11 @@ pub fn deinit(fl: *FreeList, gpa: Allocator) void {
     fl.* = undefined;
 }
 
-/// Returns null when no free range is large enough.
+/// Returns null when no free range is large enough. `len == 0` always
+/// succeeds with `Range{ .offset = 0, .len = 0 }`, without touching the free
+/// list (empty meshes, e.g. buried chunks, are common).
 pub fn alloc(fl: *FreeList, len: u32) ?Range {
-    std.debug.assert(len > 0);
+    if (len == 0) return .{ .offset = 0, .len = 0 };
     for (fl.free_ranges.items, 0..) |*r, i| {
         if (r.len < len) continue;
         const out: Range = .{ .offset = r.offset, .len = len };
@@ -42,8 +44,10 @@ pub fn alloc(fl: *FreeList, len: u32) ?Range {
     return null;
 }
 
-/// Gives `range` back, merging it with adjacent free ranges.
+/// Gives `range` back, merging it with adjacent free ranges. A zero-length
+/// range (from allocating 0) is a no-op.
 pub fn free(fl: *FreeList, gpa: Allocator, range: Range) Allocator.Error!void {
+    if (range.len == 0) return;
     const items = fl.free_ranges.items;
     var i: usize = 0;
     while (i < items.len and items[i].offset < range.offset) : (i += 1) {}
@@ -106,4 +110,23 @@ test "first fit reuses a hole" {
     try fl.free(testing.allocator, a);
     try testing.expectEqual(Range{ .offset = 0, .len = 3 }, fl.alloc(3).?);
     try testing.expectEqual(5, fl.freeCount());
+}
+
+test "alloc(0) returns the zero range without touching the free list" {
+    var fl: FreeList = try .init(testing.allocator, 10);
+    defer fl.deinit(testing.allocator);
+    try testing.expectEqual(Range{ .offset = 0, .len = 0 }, fl.alloc(0).?);
+    try testing.expectEqual(1, fl.free_ranges.items.len);
+    try testing.expectEqual(Range{ .offset = 0, .len = 10 }, fl.free_ranges.items[0]);
+    try testing.expectEqual(10, fl.freeCount());
+}
+
+test "free of the zero range is a no-op" {
+    var fl: FreeList = try .init(testing.allocator, 10);
+    defer fl.deinit(testing.allocator);
+    _ = fl.alloc(4).?;
+    try fl.free(testing.allocator, .{ .offset = 0, .len = 0 });
+    try testing.expectEqual(1, fl.free_ranges.items.len);
+    try testing.expectEqual(Range{ .offset = 4, .len = 6 }, fl.free_ranges.items[0]);
+    try testing.expectEqual(6, fl.freeCount());
 }
