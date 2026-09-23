@@ -48,6 +48,16 @@ pub fn build(b: *std.Build) void {
     });
     exe_mod.linkLibrary(zglfw.artifact("glfw"));
 
+    // Shaders: GLSL -> SPIR-V with glslc, embedded with @embedFile("<name>").
+    const shaders = [_][]const u8{ "fullscreen.vert", "sky.frag" };
+    for (shaders) |name| {
+        const glslc = b.addSystemCommand(&.{ "glslc", "--target-env=vulkan1.4", "-O", "-o" });
+        const spv = glslc.addOutputFileArg(b.fmt("{s}.spv", .{name}));
+        glslc.addFileArg(b.path(b.fmt("src/render/shaders/{s}", .{name})));
+        glslc.addFileInput(b.path("src/render/shaders/common.glsl"));
+        exe_mod.addAnonymousImport(name, .{ .root_source_file = spv });
+    }
+
     const exe = b.addExecutable(.{ .name = "ft_vox", .root_module = exe_mod });
     b.installArtifact(exe);
 
