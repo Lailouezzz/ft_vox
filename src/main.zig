@@ -1,10 +1,17 @@
 const std = @import("std");
 const glfw = @import("zglfw");
 const vk = @import("vulkan");
+const world = @import("world");
 const Context = @import("render/Context.zig");
 const Renderer = @import("render/Renderer.zig");
 const Camera = @import("Camera.zig");
+const ChunkManager = @import("ChunkManager.zig");
 const Sun = @import("Sun.zig");
+
+pub const std_options: std.Options = .{
+    // Worker pool state changes are too chatty at debug level.
+    .log_scope_levels = &.{.{ .scope = .worker_pool, .level = .info }},
+};
 
 const walk_speed: f32 = 12; // blocks per second
 const sprint_factor: f32 = 6;
@@ -12,6 +19,7 @@ const mouse_sensitivity: f32 = 0.0025;
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
+    const io = init.io;
 
     try glfw.init();
     defer glfw.terminate();
@@ -25,10 +33,16 @@ pub fn main(init: std.process.Init) !void {
     var renderer: Renderer = try .init(gpa, &ctx, framebufferExtent(window));
     defer renderer.deinit();
 
+    const workers = @max(1, (std.Thread.getCpuCount() catch 2) - 1);
+    const chunks = try ChunkManager.create(gpa, io, .{ .seed = 42, .gen_workers = workers, .mesh_workers = workers });
+    defer chunks.destroy();
+
     var camera: Camera = .{};
     var sun: Sun = .{};
     var last_cursor = window.getCursorPos();
     var last_time = glfw.getTime();
+    var title_timer: f64 = 0;
+    var frames: u32 = 0;
 
     while (!window.shouldClose()) {
         glfw.pollEvents();
@@ -64,13 +78,42 @@ pub fn main(init: std.process.Init) !void {
 
         sun.advance(dt);
 
+        // Streaming: hand finished meshes to the GPU, uploads before unloads.
+        try chunks.update(.{ .x = @intFromFloat(@floor(camera.pos[0])), .y = @intFromFloat(@floor(camera.pos[1])), .z = @intFromFloat(@floor(camera.pos[2])) });
+        for (chunks.takeUploads()) |u| try renderer.chunks.upload(u.pos, u.mesh.quads, u.mesh.counts);
+        for (chunks.takeUnloads()) |p| try renderer.chunks.remove(p);
+
         const extent = framebufferExtent(window);
         if (extent.width == 0 or extent.height == 0) continue;
         const aspect = @as(f32, @floatFromInt(extent.width)) / @as(f32, @floatFromInt(extent.height));
+        const light = sun.lighting();
+        const far: f32 = @floatFromInt(@as(u32, 16) * world.chunk_size);
         try renderer.drawFrame(extent, .{
             .view_proj = camera.viewProj(aspect),
-            .sun_dir = sun.direction(),
+            .camera_pos = camera.pos,
+            .sun_dir = light.dir,
+            .sun_color = light.color,
+            .ambient = light.ambient,
+            .fog_start = far * 0.6,
+            .fog_end = far * 0.95,
         });
+
+        frames += 1;
+        title_timer += dt;
+        if (title_timer >= 0.5) {
+            var buf: [160]u8 = undefined;
+            const title = std.fmt.bufPrintZ(&buf, "ft_vox | {d:.0} fps | {d} chunks | {d} quads | pos {d:.0} {d:.0} {d:.0}", .{
+                @as(f64, @floatFromInt(frames)) / title_timer,
+                renderer.chunks.chunkCount(),
+                renderer.chunks.quad_count,
+                camera.pos[0],
+                camera.pos[1],
+                camera.pos[2],
+            }) catch "ft_vox";
+            window.setTitle(title);
+            frames = 0;
+            title_timer = 0;
+        }
     }
 }
 
@@ -81,6 +124,7 @@ fn framebufferExtent(window: *glfw.Window) vk.Extent2D {
 
 test {
     _ = @import("Camera.zig");
-    _ = @import("Sun.zig");
     _ = @import("ChunkManager.zig");
+    _ = @import("Sun.zig");
+    _ = @import("render/gpu.zig");
 }
