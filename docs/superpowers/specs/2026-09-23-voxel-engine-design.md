@@ -119,10 +119,10 @@ ChunkPos ─gen_in─► GenPool ─gen_out─► ChunkManager ─mesh_in─► 
 ```
 
 - `GenPool = WorkerPool(GenJob, GenResult)` : `GenJob = { id, pos, seed }`,
-  `GenResult = { id, pos, chunk: *Chunk }`.
+  `GenResult = { id, pos, chunk: ?*Chunk }` (`null` = échec, job relancé).
 - `MeshPool = WorkerPool(MeshJob, MeshResult)` : `MeshJob = { id, pos,
   version, volume: *[34³]Block }`, `MeshResult = { id, pos, version,
-  quads, ranges: [6] }`.
+  quads, ranges: [6], failed: bool }` (échec = remaillage relancé).
 - Pas de pipe direct : un chunk généré ne peut être maillé qu'une fois ses
   6 voisins générés, c'est le ChunkManager (thread principal) qui fait le
   lien.
@@ -225,6 +225,15 @@ Contrôles : vol libre, ZQSD + souris, Shift pour accélérer, Échap quitte.
 
 Chacun compile, passe ses tests, et fait l'objet d'un commit.
 
+0. Ajustements `threading` :
+   - `WorkerPool` : une erreur de tâche est loggée et le worker continue
+     (seul `error.Canceled` remonte) ;
+   - `WorkQueue.pop()` : `error.Closed` seulement si fermée **et** vide,
+     comme `waitPop` ;
+   - `drain()` conservé, doc comment : les items sont jetés sans être
+     libérés ;
+   - tests : une tâche qui échoue ne fait perdre aucun worker ;
+     `pop()` après `close()` rend les items restants puis `error.Closed`.
 1. `world` : blocs, chunk, génération (relief, grottes, eau, arbres),
    raycast, FreeList + tests.
 2. `mesher` : binary greedy meshing + tests + bench.
