@@ -10,7 +10,13 @@ pub const FrameData = extern struct {
     ambient: [4]f32,
     fog: [4]f32,
     palette: [8][4]f32,
+    cascade_vp: [3]zm.Mat,
+    cascade_planes: [18][4]f32,
+    cascade_splits: [4]f32,
+    cascade_texel: [4]f32,
+    shadow: [4]f32,
     chunk_capacity: u32,
+    max_draws: u32,
 };
 
 pub const ChunkMeta = extern struct {
@@ -34,6 +40,8 @@ pub const Push = extern struct {
     quads: u64,
     draws: u64,
     count: u64,
+    /// 0: camera, 1..3: shadow cascades.
+    view: u32,
 };
 
 /// Frustum planes (normal pointing inside, xyz·p + w >= 0 inside) of a

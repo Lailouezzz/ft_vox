@@ -71,6 +71,8 @@ pub fn remove(self: *ChunkBuffers, pos: world.ChunkPos) !void {
     try self.release(pos);
 }
 
+// ponytail: linear scan per upload, O(n²) over an initial burst; a pos → index
+// map if it ever shows in a profile (it does not next to meshing).
 fn dropPending(self: *ChunkBuffers, pos: world.ChunkPos) void {
     var i: usize = 0;
     while (i < self.pending.items.len) {
@@ -90,7 +92,8 @@ fn release(self: *ChunkBuffers, pos: world.ChunkPos) !void {
 }
 
 /// Records this frame's transfers: pending meshes that fit in `staging`, then
-/// metadata updates. Ends with a barrier making them visible to culling and drawing.
+/// metadata updates. The caller issues the barrier that makes them visible to
+/// culling and drawing.
 pub fn record(self: *ChunkBuffers, cmd: vk.CommandBufferProxy, staging: *const Buffer) !void {
     barrier(cmd, .{ .compute_shader_bit = true, .vertex_shader_bit = true, .draw_indirect_bit = true }, .{ .shader_storage_read_bit = true, .indirect_command_read_bit = true }, .{ .copy_bit = true, .clear_bit = true }, .{ .transfer_write_bit = true });
 
@@ -101,14 +104,21 @@ pub fn record(self: *ChunkBuffers, cmd: vk.CommandBufferProxy, staging: *const B
     var done: usize = 0;
     for (self.pending.items) |p| {
         if (used + p.quads.len > staged.len) break;
-        try self.release(p.pos);
         done += 1;
-        if (p.quads.len == 0) continue;
+        if (p.quads.len == 0) {
+            try self.release(p.pos);
+            continue;
+        }
+        // Allocate before releasing: when the buffer is full the previous mesh stays visible.
         const range = self.ranges.alloc(@intCast(p.quads.len)) orelse {
-            std.log.scoped(.render).warn("quad buffer full, dropping chunk {any}", .{p.pos});
+            std.log.scoped(.render).warn("quad buffer full, keeping the previous mesh of chunk {any}", .{p.pos});
             continue;
         };
-        const index = self.free_slots.pop() orelse blk: {
+        const index = if (self.slots.get(p.pos)) |old| blk: {
+            try self.ranges.free(self.gpa, old.range);
+            self.quad_count -= old.range.len;
+            break :blk old.index;
+        } else self.free_slots.pop() orelse blk: {
             if (self.slot_high == max_chunks) {
                 try self.ranges.free(self.gpa, range);
                 std.log.scoped(.render).warn("chunk slots full, dropping chunk {any}", .{p.pos});

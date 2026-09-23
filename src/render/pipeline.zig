@@ -10,11 +10,6 @@ pub fn spirv(comptime name: []const u8) []const u32 {
     return std.mem.bytesAsSlice(u32, &bytes);
 }
 
-pub const Stage = struct {
-    stage: vk.ShaderStageFlags,
-    code: []const u32,
-};
-
 pub const GraphicsDesc = struct {
     layout: vk.PipelineLayout,
     vertex: []const u32,

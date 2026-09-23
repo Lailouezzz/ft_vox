@@ -30,7 +30,7 @@ pub fn main(init: std.process.Init) !void {
 
     var ctx: Context = try .init(gpa, window);
     defer ctx.deinit(gpa);
-    var renderer: Renderer = try .init(gpa, &ctx, framebufferExtent(window));
+    var renderer: Renderer = try .init(gpa, &ctx, framebufferExtent(window), .{});
     defer renderer.deinit();
 
     // One core stays free for the render thread: oversubscribing starves it while loading.
@@ -87,15 +87,11 @@ pub fn main(init: std.process.Init) !void {
 
         const extent = framebufferExtent(window);
         if (extent.width == 0 or extent.height == 0) continue;
-        const aspect = @as(f32, @floatFromInt(extent.width)) / @as(f32, @floatFromInt(extent.height));
-        const light = sun.lighting();
         const far: f32 = @floatFromInt(@as(u32, 16) * world.chunk_size);
         try renderer.drawFrame(extent, .{
-            .view_proj = camera.viewProj(aspect),
-            .camera_pos = camera.pos,
-            .sun_dir = light.dir,
-            .sun_color = light.color,
-            .ambient = light.ambient,
+            .camera = camera,
+            .light = sun.lighting(),
+            .shadows = sun.direction()[1] > 0.02,
             .fog_start = far * 0.6,
             .fog_end = far * 0.95,
         });
@@ -129,4 +125,5 @@ test {
     _ = @import("ChunkManager.zig");
     _ = @import("Sun.zig");
     _ = @import("render/gpu.zig");
+    _ = @import("render/Shadows.zig");
 }

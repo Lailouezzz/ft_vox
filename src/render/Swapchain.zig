@@ -23,6 +23,7 @@ pub fn init(ctx: *const Context, gpa: Allocator, extent: vk.Extent2D, old: vk.Sw
         .width = std.math.clamp(extent.width, caps.min_image_extent.width, caps.max_image_extent.width),
         .height = std.math.clamp(extent.height, caps.min_image_extent.height, caps.max_image_extent.height),
     };
+    if (actual.width == 0 or actual.height == 0) return error.ZeroExtent;
     var image_count = caps.min_image_count + 1;
     if (caps.max_image_count > 0) image_count = @min(image_count, caps.max_image_count);
 
@@ -42,7 +43,6 @@ pub fn init(ctx: *const Context, gpa: Allocator, extent: vk.Extent2D, old: vk.Sw
         .old_swapchain = old,
     }, null);
     errdefer ctx.device.destroySwapchainKHR(handle, null);
-    if (old != .null_handle) ctx.device.destroySwapchainKHR(old, null);
 
     const images = try ctx.device.getSwapchainImagesAllocKHR(handle, gpa);
     errdefer gpa.free(images);
@@ -50,6 +50,11 @@ pub fn init(ctx: *const Context, gpa: Allocator, extent: vk.Extent2D, old: vk.Sw
     errdefer gpa.free(views);
     const render_done = try gpa.alloc(vk.Semaphore, images.len);
     errdefer gpa.free(render_done);
+    var created: usize = 0;
+    errdefer for (views[0..created], render_done[0..created]) |v, s| {
+        ctx.device.destroyImageView(v, null);
+        ctx.device.destroySemaphore(s, null);
+    };
     for (images, views, render_done) |img, *view, *sem| {
         view.* = try ctx.device.createImageView(&.{
             .image = img,
@@ -58,13 +63,18 @@ pub fn init(ctx: *const Context, gpa: Allocator, extent: vk.Extent2D, old: vk.Sw
             .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
             .subresource_range = .{ .aspect_mask = .{ .color_bit = true }, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 },
         }, null);
-        sem.* = try ctx.device.createSemaphore(&.{}, null);
+        sem.* = ctx.device.createSemaphore(&.{}, null) catch |err| {
+            ctx.device.destroyImageView(view.*, null);
+            return err;
+        };
+        created += 1;
     }
     return .{ .handle = handle, .format = format.format, .extent = actual, .images = images, .views = views, .render_done = render_done };
 }
 
-/// Destroys views and semaphores; keeps `handle` alive when it is handed to `init` as `old`.
-pub fn deinitKeepHandle(self: *Swapchain, ctx: *const Context, gpa: Allocator) void {
+/// `old` (the previous swapchain, or null) is only retired: the caller destroys
+/// it once the new one exists, so a failure here leaves it usable.
+pub fn deinit(self: *Swapchain, ctx: *const Context, gpa: Allocator) void {
     for (self.views, self.render_done) |v, s| {
         ctx.device.destroyImageView(v, null);
         ctx.device.destroySemaphore(s, null);
@@ -72,10 +82,6 @@ pub fn deinitKeepHandle(self: *Swapchain, ctx: *const Context, gpa: Allocator) v
     gpa.free(self.views);
     gpa.free(self.render_done);
     gpa.free(self.images);
-}
-
-pub fn deinit(self: *Swapchain, ctx: *const Context, gpa: Allocator) void {
-    self.deinitKeepHandle(ctx, gpa);
     ctx.device.destroySwapchainKHR(self.handle, null);
     self.* = undefined;
 }

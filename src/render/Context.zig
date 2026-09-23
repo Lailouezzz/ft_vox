@@ -43,6 +43,13 @@ pub fn init(gpa: Allocator, window: *glfw.Window) !Context {
         .message_type = .{ .general_bit_ext = true, .validation_bit_ext = true, .performance_bit_ext = true },
         .pfn_user_callback = debugCallback,
     };
+    // Wrappers are allocated before the handles they load, so that no failure
+    // can leave a live instance or device without the means to destroy it.
+    self.vki = try gpa.create(vk.InstanceWrapper);
+    errdefer gpa.destroy(self.vki);
+    self.vkd = try gpa.create(vk.DeviceWrapper);
+    errdefer gpa.destroy(self.vkd);
+
     const instance = try self.vkb.createInstance(&.{
         .p_next = if (debug) &debug_info else null,
         .p_application_info = &.{
@@ -58,8 +65,6 @@ pub fn init(gpa: Allocator, window: *glfw.Window) !Context {
         .pp_enabled_extension_names = exts.items.ptr,
     }, null);
 
-    self.vki = try gpa.create(vk.InstanceWrapper);
-    errdefer gpa.destroy(self.vki);
     self.vki.* = vk.InstanceWrapper.load(instance, self.vkb.dispatch.vkGetInstanceProcAddr.?);
     self.instance = vk.InstanceProxy.init(instance, self.vki);
     errdefer self.instance.destroyInstance(null);
@@ -88,8 +93,6 @@ pub fn init(gpa: Allocator, window: *glfw.Window) !Context {
         .enabled_extension_count = 1,
         .pp_enabled_extension_names = &.{vk.extensions.khr_swapchain.name},
     }, null);
-    self.vkd = try gpa.create(vk.DeviceWrapper);
-    errdefer gpa.destroy(self.vkd);
     self.vkd.* = vk.DeviceWrapper.load(dev, self.vki.dispatch.vkGetDeviceProcAddr.?);
     self.device = vk.DeviceProxy.init(dev, self.vkd);
     self.queue = vk.QueueProxy.init(self.device.getDeviceQueue(self.queue_family, 0), self.vkd);

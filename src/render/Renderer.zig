@@ -1,7 +1,9 @@
-//! Frame loop: frames in flight, depth buffer, passes.
+//! Frame loop: frames in flight, chunk uploads, GPU culling for the camera and
+//! each shadow cascade, shadow passes, then sky and chunks.
 const std = @import("std");
 const vk = @import("vulkan");
 const zm = @import("zmath");
+const world = @import("world");
 const Allocator = std.mem.Allocator;
 const Context = @import("Context.zig");
 const Swapchain = @import("Swapchain.zig");
@@ -9,13 +11,19 @@ const pipeline = @import("pipeline.zig");
 const Image = @import("Image.zig");
 const Buffer = @import("Buffer.zig");
 const ChunkBuffers = @import("ChunkBuffers.zig");
+const Shadows = @import("Shadows.zig");
 const gpu = @import("gpu.zig");
-const world = @import("world");
+const Camera = @import("../Camera.zig");
+const Sun = @import("../Sun.zig");
 
 const Renderer = @This();
 
 pub const frames_in_flight = 2;
 const depth_format: vk.Format = .d32_sfloat;
+/// Views culled each frame: the camera, then one per shadow cascade.
+const views = 1 + Shadows.cascades;
+const max_draws = ChunkBuffers.max_chunks * 6;
+const chunk_stages: vk.ShaderStageFlags = .{ .compute_bit = true, .vertex_bit = true, .fragment_bit = true };
 
 const Frame = struct {
     pool: vk.CommandPool,
@@ -27,12 +35,15 @@ const Frame = struct {
     staging: Buffer,
 };
 
+pub const Options = struct {
+    shadow_resolution: u32 = 2048,
+};
+
 pub const FrameInput = struct {
-    view_proj: zm.Mat,
-    camera_pos: [3]f32,
-    sun_dir: [3]f32,
-    sun_color: [3]f32,
-    ambient: [3]f32,
+    camera: Camera,
+    light: Sun.Lighting,
+    /// Shadows are skipped at night (the moon casts none).
+    shadows: bool,
     fog_start: f32,
     fog_end: f32,
 };
@@ -40,45 +51,57 @@ pub const FrameInput = struct {
 gpa: Allocator,
 ctx: *const Context,
 swapchain: Swapchain,
+/// Framebuffer size the swapchain was last built for (not the clamped one).
+requested_extent: vk.Extent2D,
 depth: Image,
 frames: [frames_in_flight]Frame,
 frame_index: usize = 0,
 sky_layout: vk.PipelineLayout,
 sky_pipeline: vk.Pipeline,
 chunks: ChunkBuffers,
+shadows: Shadows,
 draws: Buffer,
 draw_count: Buffer,
+set_layout: vk.DescriptorSetLayout,
 chunk_layout: vk.PipelineLayout,
 cull_pipeline: vk.Pipeline,
 chunk_pipeline: vk.Pipeline,
+shadow_pipeline: vk.Pipeline,
 
-pub fn init(gpa: Allocator, ctx: *const Context, extent: vk.Extent2D) !Renderer {
+pub fn init(gpa: Allocator, ctx: *const Context, extent: vk.Extent2D, options: Options) !Renderer {
+    const d = ctx.device;
     var swapchain: Swapchain = try .init(ctx, gpa, extent, .null_handle);
     errdefer swapchain.deinit(ctx, gpa);
     var depth: Image = try .initDepth(ctx, swapchain.extent, depth_format);
     errdefer depth.deinit(ctx);
 
     var frames: [frames_in_flight]Frame = undefined;
+    var frames_done: usize = 0;
+    errdefer for (frames[0..frames_done]) |*f| destroyFrame(ctx, f);
     for (&frames) |*f| {
-        f.pool = try ctx.device.createCommandPool(&.{ .flags = .{ .reset_command_buffer_bit = true }, .queue_family_index = ctx.queue_family }, null);
-        try ctx.device.allocateCommandBuffers(&.{ .command_pool = f.pool, .level = .primary, .command_buffer_count = 1 }, @ptrCast(&f.cmd));
-        f.image_acquired = try ctx.device.createSemaphore(&.{}, null);
-        f.fence = try ctx.device.createFence(&.{ .flags = .{ .signaled_bit = true } }, null);
-        f.frame_data = try .init(ctx, @sizeOf(gpu.FrameData), .{ .storage_buffer_bit = true }, true);
-        f.staging = try .init(ctx, ChunkBuffers.staging_size, .{ .transfer_src_bit = true }, true);
+        f.* = try createFrame(ctx);
+        frames_done += 1;
     }
 
     var chunks: ChunkBuffers = try .init(ctx, gpa);
     errdefer chunks.deinit(ctx);
-    const max_draws = ChunkBuffers.max_chunks * 6;
-    var draws: Buffer = try .init(ctx, max_draws * @sizeOf(gpu.DrawCmd), .{ .storage_buffer_bit = true, .indirect_buffer_bit = true }, false);
+    var shadows: Shadows = try .init(ctx, options.shadow_resolution);
+    errdefer shadows.deinit(ctx);
+    var draws: Buffer = try .init(ctx, views * max_draws * @sizeOf(gpu.DrawCmd), .{ .storage_buffer_bit = true, .indirect_buffer_bit = true }, false);
     errdefer draws.deinit(ctx);
-    var draw_count: Buffer = try .init(ctx, 4, .{ .storage_buffer_bit = true, .indirect_buffer_bit = true, .transfer_dst_bit = true }, false);
+    var draw_count: Buffer = try .init(ctx, views * @sizeOf(u32), .{ .storage_buffer_bit = true, .indirect_buffer_bit = true, .transfer_dst_bit = true }, false);
     errdefer draw_count.deinit(ctx);
-    const chunk_layout = try pipeline.createLayout(ctx, @sizeOf(gpu.Push), .{ .compute_bit = true, .vertex_bit = true, .fragment_bit = true }, &.{});
-    const cull_pipeline = try pipeline.createCompute(ctx, chunk_layout, pipeline.spirv("cull.comp"));
+
+    // The shadow map is bound with a push descriptor: no pool, no sets.
+    const binding: vk.DescriptorSetLayoutBinding = .{ .binding = 0, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true } };
+    const set_layout = try d.createDescriptorSetLayout(&.{ .flags = .{ .push_descriptor_bit = true }, .binding_count = 1, .p_bindings = @ptrCast(&binding) }, null);
+    errdefer d.destroyDescriptorSetLayout(set_layout, null);
 
     const sky_layout = try pipeline.createLayout(ctx, @sizeOf(SkyPush), .{ .fragment_bit = true }, &.{});
+    errdefer d.destroyPipelineLayout(sky_layout, null);
+    const chunk_layout = try pipeline.createLayout(ctx, @sizeOf(gpu.Push), chunk_stages, &.{set_layout});
+    errdefer d.destroyPipelineLayout(chunk_layout, null);
+
     const sky_pipeline = try pipeline.createGraphics(ctx, .{
         .layout = sky_layout,
         .vertex = pipeline.spirv("fullscreen.vert"),
@@ -89,6 +112,9 @@ pub fn init(gpa: Allocator, ctx: *const Context, extent: vk.Extent2D) !Renderer 
         .depth_write = false,
         .cull_back = false,
     });
+    errdefer d.destroyPipeline(sky_pipeline, null);
+    const cull_pipeline = try pipeline.createCompute(ctx, chunk_layout, pipeline.spirv("cull.comp"));
+    errdefer d.destroyPipeline(cull_pipeline, null);
     const chunk_pipeline = try pipeline.createGraphics(ctx, .{
         .layout = chunk_layout,
         .vertex = pipeline.spirv("chunk.vert"),
@@ -96,43 +122,80 @@ pub fn init(gpa: Allocator, ctx: *const Context, extent: vk.Extent2D) !Renderer 
         .color_format = swapchain.format,
         .depth_format = depth_format,
     });
+    errdefer d.destroyPipeline(chunk_pipeline, null);
+    // Casters beyond the cascade's near plane are clamped instead of clipped.
+    const shadow_pipeline = try pipeline.createGraphics(ctx, .{
+        .layout = chunk_layout,
+        .vertex = pipeline.spirv("shadow.vert"),
+        .fragment = null,
+        .color_format = null,
+        .depth_format = Shadows.format,
+        .depth_clamp = true,
+        .depth_bias = true,
+    });
+
     return .{
         .gpa = gpa,
         .ctx = ctx,
         .swapchain = swapchain,
+        .requested_extent = extent,
         .depth = depth,
         .frames = frames,
         .sky_layout = sky_layout,
         .sky_pipeline = sky_pipeline,
         .chunks = chunks,
+        .shadows = shadows,
         .draws = draws,
         .draw_count = draw_count,
+        .set_layout = set_layout,
         .chunk_layout = chunk_layout,
         .cull_pipeline = cull_pipeline,
         .chunk_pipeline = chunk_pipeline,
+        .shadow_pipeline = shadow_pipeline,
     };
 }
 
 pub fn deinit(self: *Renderer) void {
     const d = self.ctx.device;
     d.deviceWaitIdle() catch {};
+    d.destroyPipeline(self.shadow_pipeline, null);
     d.destroyPipeline(self.chunk_pipeline, null);
     d.destroyPipeline(self.cull_pipeline, null);
+    d.destroyPipeline(self.sky_pipeline, null);
     d.destroyPipelineLayout(self.chunk_layout, null);
+    d.destroyPipelineLayout(self.sky_layout, null);
+    d.destroyDescriptorSetLayout(self.set_layout, null);
     self.draw_count.deinit(self.ctx);
     self.draws.deinit(self.ctx);
+    self.shadows.deinit(self.ctx);
     self.chunks.deinit(self.ctx);
-    d.destroyPipeline(self.sky_pipeline, null);
-    d.destroyPipelineLayout(self.sky_layout, null);
-    for (&self.frames) |*f| {
-        f.staging.deinit(self.ctx);
-        f.frame_data.deinit(self.ctx);
-        d.destroyFence(f.fence, null);
-        d.destroySemaphore(f.image_acquired, null);
-        d.destroyCommandPool(f.pool, null);
-    }
+    for (&self.frames) |*f| destroyFrame(self.ctx, f);
     self.depth.deinit(self.ctx);
     self.swapchain.deinit(self.ctx, self.gpa);
+}
+
+fn createFrame(ctx: *const Context) !Frame {
+    const d = ctx.device;
+    const pool = try d.createCommandPool(&.{ .flags = .{ .reset_command_buffer_bit = true }, .queue_family_index = ctx.queue_family }, null);
+    errdefer d.destroyCommandPool(pool, null);
+    var cmd: vk.CommandBuffer = undefined;
+    try d.allocateCommandBuffers(&.{ .command_pool = pool, .level = .primary, .command_buffer_count = 1 }, @ptrCast(&cmd));
+    const image_acquired = try d.createSemaphore(&.{}, null);
+    errdefer d.destroySemaphore(image_acquired, null);
+    const fence = try d.createFence(&.{ .flags = .{ .signaled_bit = true } }, null);
+    errdefer d.destroyFence(fence, null);
+    var frame_data: Buffer = try .init(ctx, @sizeOf(gpu.FrameData), .{ .storage_buffer_bit = true }, true);
+    errdefer frame_data.deinit(ctx);
+    const staging: Buffer = try .init(ctx, ChunkBuffers.staging_size, .{ .transfer_src_bit = true }, true);
+    return .{ .pool = pool, .cmd = cmd, .image_acquired = image_acquired, .fence = fence, .frame_data = frame_data, .staging = staging };
+}
+
+fn destroyFrame(ctx: *const Context, f: *Frame) void {
+    f.staging.deinit(ctx);
+    f.frame_data.deinit(ctx);
+    ctx.device.destroyFence(f.fence, null);
+    ctx.device.destroySemaphore(f.image_acquired, null);
+    ctx.device.destroyCommandPool(f.pool, null);
 }
 
 const SkyPush = extern struct {
@@ -150,6 +213,7 @@ pub fn drawFrame(self: *Renderer, extent: vk.Extent2D, in: FrameInput) !void {
         error.OutOfDateKHR => return self.recreate(extent),
         else => return err,
     };
+    // Reset only once an image is acquired: an early return must leave the fence signalled.
     try d.resetFences(&.{frame.fence});
     const image_index = acquired.image_index;
 
@@ -157,28 +221,72 @@ pub fn drawFrame(self: *Renderer, extent: vk.Extent2D, in: FrameInput) !void {
     try cmd.resetCommandBuffer(.{});
     try cmd.beginCommandBuffer(&.{ .flags = .{ .one_time_submit_bit = true } });
 
-    // Chunk uploads, then GPU culling into the indirect draw buffer.
-    self.writeFrameData(frame, in);
-    const push: gpu.Push = .{
+    const ext = self.swapchain.extent;
+    const aspect = @as(f32, @floatFromInt(ext.width)) / @as(f32, @floatFromInt(ext.height));
+    const view_proj = in.camera.viewProj(aspect);
+    // Uploads first: slots allocated this frame are then culled this frame.
+    try self.chunks.record(cmd, &frame.staging);
+    self.writeFrameData(frame, in, view_proj, aspect);
+
+    // 1. Chunk uploads, then GPU culling for every view into the indirect buffer.
+    var push: gpu.Push = .{
         .frame = frame.frame_data.address,
         .metas = self.chunks.metas.address,
         .quads = self.chunks.quads.address,
         .draws = self.draws.address,
         .count = self.draw_count.address,
+        .view = 0,
     };
-    try self.chunks.record(cmd, &frame.staging);
-    cmd.fillBuffer(self.draw_count.handle, 0, 4, 0);
+    cmd.fillBuffer(self.draw_count.handle, 0, views * @sizeOf(u32), 0);
     ChunkBuffers.barrier(cmd, .{ .copy_bit = true, .clear_bit = true }, .{ .transfer_write_bit = true }, .{ .compute_shader_bit = true, .vertex_shader_bit = true }, .{ .shader_storage_read_bit = true, .shader_storage_write_bit = true });
     cmd.bindPipeline(.compute, self.cull_pipeline);
-    cmd.pushConstants(self.chunk_layout, .{ .compute_bit = true, .vertex_bit = true, .fragment_bit = true }, 0, @sizeOf(gpu.Push), &push);
-    cmd.dispatch(std.math.divCeil(u32, self.chunks.slot_high, 64) catch unreachable, 1, 1);
+    const groups = std.math.divCeil(u32, self.chunks.slot_high, 64) catch unreachable;
+    const culled_views: u32 = if (in.shadows) views else 1;
+    for (0..culled_views) |v| {
+        push.view = @intCast(v);
+        cmd.pushConstants(self.chunk_layout, chunk_stages, 0, @sizeOf(gpu.Push), &push);
+        cmd.dispatch(groups, 1, 1);
+    }
     ChunkBuffers.barrier(cmd, .{ .compute_shader_bit = true }, .{ .shader_storage_write_bit = true }, .{ .draw_indirect_bit = true }, .{ .indirect_command_read_bit = true });
 
+    // 2. Shadow cascades, depth only. Cleared even when skipped: the lighting pass samples them.
+    const shadow_image = self.shadows.image.image;
+    imageBarrier(cmd, shadow_image, .{ .depth_bit = true }, .undefined, .depth_attachment_optimal, .{ .fragment_shader_bit = true }, .{}, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true }, .{ .depth_stencil_attachment_write_bit = true, .depth_stencil_attachment_read_bit = true });
+    const res = self.shadows.resolution;
+    for (self.shadows.layer_views, 1..) |layer_view, v| {
+        const att: vk.RenderingAttachmentInfo = .{
+            .image_view = layer_view,
+            .image_layout = .depth_attachment_optimal,
+            .resolve_mode = .{},
+            .resolve_image_layout = .undefined,
+            .load_op = .clear,
+            .store_op = .store,
+            .clear_value = .{ .depth_stencil = .{ .depth = 0, .stencil = 0 } },
+        };
+        cmd.beginRendering(&.{
+            .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = res, .height = res } },
+            .layer_count = 1,
+            .view_mask = 0,
+            .color_attachment_count = 0,
+            .p_depth_attachment = &att,
+        });
+        if (in.shadows) {
+            setViewport(cmd, .{ .width = res, .height = res });
+            // Reverse-Z: a negative bias pushes casters away from the light.
+            cmd.setDepthBias(-1.5, 0, -2.0);
+            cmd.bindPipeline(.graphics, self.shadow_pipeline);
+            push.view = @intCast(v);
+            cmd.pushConstants(self.chunk_layout, chunk_stages, 0, @sizeOf(gpu.Push), &push);
+            cmd.drawIndirectCount(self.draws.handle, v * max_draws * @sizeOf(gpu.DrawCmd), self.draw_count.handle, v * @sizeOf(u32), max_draws, @sizeOf(gpu.DrawCmd));
+        }
+        cmd.endRendering();
+    }
+    imageBarrier(cmd, shadow_image, .{ .depth_bit = true }, .depth_attachment_optimal, .depth_read_only_optimal, .{ .late_fragment_tests_bit = true }, .{ .depth_stencil_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_sampled_read_bit = true });
+
+    // 3. Main pass: sky, then chunks.
     const image = self.swapchain.images[image_index];
     imageBarrier(cmd, image, .{ .color_bit = true }, .undefined, .color_attachment_optimal, .{ .color_attachment_output_bit = true }, .{}, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true });
-    imageBarrier(cmd, self.depth.image, .{ .depth_bit = true }, .undefined, .depth_attachment_optimal, .{ .late_fragment_tests_bit = true }, .{ .depth_stencil_attachment_write_bit = true }, .{ .early_fragment_tests_bit = true }, .{ .depth_stencil_attachment_write_bit = true, .depth_stencil_attachment_read_bit = true });
-
-    const ext = self.swapchain.extent;
+    imageBarrier(cmd, self.depth.image, .{ .depth_bit = true }, .undefined, .depth_attachment_optimal, .{ .late_fragment_tests_bit = true }, .{ .depth_stencil_attachment_write_bit = true }, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true }, .{ .depth_stencil_attachment_write_bit = true, .depth_stencil_attachment_read_bit = true });
     const color_att: vk.RenderingAttachmentInfo = .{
         .image_view = self.swapchain.views[image_index],
         .image_layout = .color_attachment_optimal,
@@ -207,14 +315,27 @@ pub fn drawFrame(self: *Renderer, extent: vk.Extent2D, in: FrameInput) !void {
     });
     setViewport(cmd, ext);
 
-    const sky: SkyPush = .{ .inv_view_proj = zm.inverse(in.view_proj), .sun_dir = .{ in.sun_dir[0], in.sun_dir[1], in.sun_dir[2], 0 } };
+    const d_sun = in.light.dir;
+    const sky: SkyPush = .{ .inv_view_proj = zm.inverse(view_proj), .sun_dir = .{ d_sun[0], d_sun[1], d_sun[2], 0 } };
     cmd.bindPipeline(.graphics, self.sky_pipeline);
     cmd.pushConstants(self.sky_layout, .{ .fragment_bit = true }, 0, @sizeOf(SkyPush), &sky);
     cmd.draw(3, 1, 0, 0);
 
+    const shadow_info: vk.DescriptorImageInfo = .{ .sampler = self.shadows.sampler, .image_view = self.shadows.image.view, .image_layout = .depth_read_only_optimal };
+    cmd.pushDescriptorSet(.graphics, self.chunk_layout, 0, &.{.{
+        .dst_set = .null_handle,
+        .dst_binding = 0,
+        .dst_array_element = 0,
+        .descriptor_count = 1,
+        .descriptor_type = .combined_image_sampler,
+        .p_image_info = @ptrCast(&shadow_info),
+        .p_buffer_info = undefined,
+        .p_texel_buffer_view = undefined,
+    }});
     cmd.bindPipeline(.graphics, self.chunk_pipeline);
-    cmd.pushConstants(self.chunk_layout, .{ .compute_bit = true, .vertex_bit = true, .fragment_bit = true }, 0, @sizeOf(gpu.Push), &push);
-    cmd.drawIndirectCount(self.draws.handle, 0, self.draw_count.handle, 0, ChunkBuffers.max_chunks * 6, @sizeOf(gpu.DrawCmd));
+    push.view = 0;
+    cmd.pushConstants(self.chunk_layout, chunk_stages, 0, @sizeOf(gpu.Push), &push);
+    cmd.drawIndirectCount(self.draws.handle, 0, self.draw_count.handle, 0, max_draws, @sizeOf(gpu.DrawCmd));
 
     cmd.endRendering();
     imageBarrier(cmd, image, .{ .color_bit = true }, .color_attachment_optimal, .present_src_khr, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{}, .{});
@@ -241,37 +362,64 @@ pub fn drawFrame(self: *Renderer, extent: vk.Extent2D, in: FrameInput) !void {
         error.OutOfDateKHR => return self.recreate(extent),
         else => return err,
     };
-    if (present == .suboptimal_khr or extent.width != self.swapchain.extent.width or extent.height != self.swapchain.extent.height)
+    if (present == .suboptimal_khr or extent.width != self.requested_extent.width or extent.height != self.requested_extent.height)
         try self.recreate(extent);
 }
 
-fn writeFrameData(self: *Renderer, frame: *Frame, in: FrameInput) void {
+fn writeFrameData(self: *Renderer, frame: *Frame, in: FrameInput, view_proj: zm.Mat, aspect: f32) void {
     var palette: [8][4]f32 = undefined;
     for (&palette, 0..) |*c, i| {
         const rgb = @as(world.Block, @enumFromInt(i)).color();
         c.* = .{ rgb[0], rgb[1], rgb[2], 1 };
     }
+    const cam = in.camera;
+    const l = in.light;
+    const cascades = Shadows.fitCascades(self.shadows.resolution, cam.pos, cam.forward(), cam.fov_y, aspect, cam.near, l.dir);
+    var cascade_vp: [Shadows.cascades]zm.Mat = undefined;
+    var cascade_planes: [Shadows.cascades * 6][4]f32 = undefined;
+    var cascade_texel: [4]f32 = .{ 0, 0, 0, 0 };
+    for (cascades, 0..) |c, i| {
+        cascade_vp[i] = c.view_proj;
+        @memcpy(cascade_planes[i * 6 ..][0..6], &gpu.frustumPlanes(c.view_proj));
+        cascade_texel[i] = c.texel;
+    }
+
     const data: *gpu.FrameData = @ptrCast(@alignCast(frame.frame_data.mapped.?));
     data.* = .{
-        .view_proj = in.view_proj,
-        .planes = gpu.frustumPlanes(in.view_proj),
-        .camera_pos = .{ in.camera_pos[0], in.camera_pos[1], in.camera_pos[2], 1 },
-        .sun_dir = .{ in.sun_dir[0], in.sun_dir[1], in.sun_dir[2], 0 },
-        .sun_color = .{ in.sun_color[0], in.sun_color[1], in.sun_color[2], 0 },
-        .ambient = .{ in.ambient[0], in.ambient[1], in.ambient[2], 0 },
+        .view_proj = view_proj,
+        .planes = gpu.frustumPlanes(view_proj),
+        .camera_pos = .{ cam.pos[0], cam.pos[1], cam.pos[2], 1 },
+        .sun_dir = .{ l.dir[0], l.dir[1], l.dir[2], 0 },
+        .sun_color = .{ l.color[0], l.color[1], l.color[2], 0 },
+        .ambient = .{ l.ambient[0], l.ambient[1], l.ambient[2], 0 },
         .fog = .{ in.fog_start, in.fog_end, 0, 0 },
         .palette = palette,
+        .cascade_vp = cascade_vp,
+        .cascade_planes = cascade_planes,
+        .cascade_splits = .{ Shadows.splits[0], Shadows.splits[1], Shadows.splits[2], 0 },
+        .cascade_texel = cascade_texel,
+        .shadow = .{ if (in.shadows) 1 else 0, 0, 0, 0 },
         .chunk_capacity = self.chunks.slot_high,
+        .max_draws = max_draws,
     };
 }
 
+/// Rebuilds swapchain and depth buffer for `extent`. Atomic: on failure the
+/// current ones stay valid.
 fn recreate(self: *Renderer, extent: vk.Extent2D) !void {
     if (extent.width == 0 or extent.height == 0) return; // minimized
     try self.ctx.device.deviceWaitIdle();
-    self.swapchain.deinitKeepHandle(self.ctx, self.gpa);
-    self.swapchain = try .init(self.ctx, self.gpa, extent, self.swapchain.handle);
+    var swapchain = Swapchain.init(self.ctx, self.gpa, extent, self.swapchain.handle) catch |err| switch (err) {
+        error.ZeroExtent => return, // minimized between the size query and now
+        else => return err,
+    };
+    errdefer swapchain.deinit(self.ctx, self.gpa);
+    const depth: Image = try .initDepth(self.ctx, swapchain.extent, depth_format);
+    self.swapchain.deinit(self.ctx, self.gpa); // the old handle is retired, destroying it is valid
     self.depth.deinit(self.ctx);
-    self.depth = try .initDepth(self.ctx, self.swapchain.extent, depth_format);
+    self.swapchain = swapchain;
+    self.depth = depth;
+    self.requested_extent = extent;
 }
 
 fn setViewport(cmd: vk.CommandBufferProxy, ext: vk.Extent2D) void {
