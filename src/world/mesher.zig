@@ -86,6 +86,29 @@ const Scratch = struct {
 
 threadlocal var scratch: Scratch = undefined;
 
+/// Concatenates the six per-face lists into one slice sorted by face, and takes
+/// ownership of `lists`: they are freed before this returns, on both the success
+/// and the allocation-failure path. Callers must not deinit/free `lists` themselves.
+fn fromLists(gpa: Allocator, lists: *[6]std.ArrayList(Quad)) Allocator.Error!Mesh {
+    var counts: [6]u32 = undefined;
+    var total: usize = 0;
+    for (lists, 0..) |l, f| {
+        counts[f] = @intCast(l.items.len);
+        total += l.items.len;
+    }
+    const quads = gpa.alloc(Quad, total) catch |err| {
+        for (lists) |*l| l.deinit(gpa);
+        return err;
+    };
+    var at: usize = 0;
+    for (lists) |*l| {
+        @memcpy(quads[at..][0..l.items.len], l.items);
+        at += l.items.len;
+        l.deinit(gpa);
+    }
+    return .{ .quads = quads, .counts = counts };
+}
+
 /// Binary greedy mesher.
 pub fn mesh(gpa: Allocator, vol: *const Volume) Allocator.Error!Mesh {
     const s = &scratch;
@@ -120,51 +143,40 @@ pub fn mesh(gpa: Allocator, vol: *const Volume) Allocator.Error!Mesh {
     }
 
     var lists: [6]std.ArrayList(Quad) = @splat(.empty);
-    errdefer for (&lists) |*l| l.deinit(gpa);
+    {
+        errdefer for (&lists) |*l| l.deinit(gpa);
 
-    const inner: u64 = ((@as(u64, 1) << cs) - 1) << 1; // bits 1..32
-    for (0..block_count) |t| {
-        if (!s.present[t] or t == @intFromEnum(Block.air)) continue;
-        const block: Block = @enumFromInt(t);
-        for (0..6) |f| {
-            const face: Face = @enumFromInt(f);
-            const axis = f / 2;
-            const occ = if (block == .water) &s.non_air[axis] else &s.solid[axis];
-            // planes[depth][v]: bit u set = visible face at (depth, u, v). Inner coords 0..31.
-            var planes: [cs][cs]u32 = @splat(@splat(0));
-            var any = false;
-            for (0..cs) |v| for (0..cs) |u| {
-                const i = (v + 1) * padded + (u + 1);
-                const c = s.cols[t][axis][i];
-                if (c == 0) continue;
-                // Positive face: neighbor at depth + 1 must not occlude.
-                const visible = inner & c & ~(if (f % 2 == 0) occ[i] >> 1 else occ[i] << 1);
-                var bits = visible;
-                while (bits != 0) : (bits &= bits - 1) {
-                    const d = @ctz(bits) - 1;
-                    planes[d][v] |= @as(u32, 1) << @intCast(u);
-                    any = true;
-                }
-            };
-            if (!any) continue;
-            for (&planes, 0..) |*plane, d| try greedyPlane(gpa, &lists[f], plane, face, block, d);
+        const inner: u64 = ((@as(u64, 1) << cs) - 1) << 1; // bits 1..32
+        for (0..block_count) |t| {
+            if (!s.present[t] or t == @intFromEnum(Block.air)) continue;
+            const block: Block = @enumFromInt(t);
+            for (0..6) |f| {
+                const face: Face = @enumFromInt(f);
+                const axis = f / 2;
+                const occ = if (block == .water) &s.non_air[axis] else &s.solid[axis];
+                // planes[depth][v]: bit u set = visible face at (depth, u, v). Inner coords 0..31.
+                var planes: [cs][cs]u32 = @splat(@splat(0));
+                var any = false;
+                for (0..cs) |v| for (0..cs) |u| {
+                    const i = (v + 1) * padded + (u + 1);
+                    const c = s.cols[t][axis][i];
+                    if (c == 0) continue;
+                    // Positive face: neighbor at depth + 1 must not occlude.
+                    const visible = inner & c & ~(if (f % 2 == 0) occ[i] >> 1 else occ[i] << 1);
+                    var bits = visible;
+                    while (bits != 0) : (bits &= bits - 1) {
+                        const d = @ctz(bits) - 1;
+                        planes[d][v] |= @as(u32, 1) << @intCast(u);
+                        any = true;
+                    }
+                };
+                if (!any) continue;
+                for (&planes, 0..) |*plane, d| try greedyPlane(gpa, &lists[f], plane, face, block, d);
+            }
         }
     }
 
-    var counts: [6]u32 = undefined;
-    var total: usize = 0;
-    for (lists, 0..) |l, f| {
-        counts[f] = @intCast(l.items.len);
-        total += l.items.len;
-    }
-    const quads = try gpa.alloc(Quad, total);
-    var at: usize = 0;
-    for (&lists) |*l| {
-        @memcpy(quads[at..][0..l.items.len], l.items);
-        at += l.items.len;
-        l.deinit(gpa);
-    }
-    return .{ .quads = quads, .counts = counts };
+    return fromLists(gpa, &lists);
 }
 
 /// Greedy-merges one 32×32 binary plane (rows = v, bits = u) into rectangles.
@@ -195,36 +207,27 @@ fn greedyPlane(gpa: Allocator, out: *std.ArrayList(Quad), plane: *[cs]u32, face:
 /// Reference mesher: one quad per visible face. Slow, obviously correct; used by tests.
 pub fn meshNaive(gpa: Allocator, vol: *const Volume) Allocator.Error!Mesh {
     var lists: [6]std.ArrayList(Quad) = @splat(.empty);
-    defer for (&lists) |*l| l.deinit(gpa);
-    for (0..cs) |y| for (0..cs) |z| for (0..cs) |x| {
-        const b = vol[volumeIndex(x + 1, y + 1, z + 1)];
-        for (0..6) |f| {
-            const face: Face = @enumFromInt(f);
-            const n = face.normal();
-            const nb = vol[
-                volumeIndex(
-                    @intCast(@as(i32, @intCast(x + 1)) + n[0]),
-                    @intCast(@as(i32, @intCast(y + 1)) + n[1]),
-                    @intCast(@as(i32, @intCast(z + 1)) + n[2]),
-                )
-            ];
-            if (!b.faceVisible(nb)) continue;
-            try lists[f].append(gpa, .{ .x = @intCast(x), .y = @intCast(y), .z = @intCast(z), .w = 1, .h = 1, .face = face, .block = b });
-        }
-    };
-    var counts: [6]u32 = undefined;
-    var total: usize = 0;
-    for (lists, 0..) |l, f| {
-        counts[f] = @intCast(l.items.len);
-        total += l.items.len;
+    {
+        errdefer for (&lists) |*l| l.deinit(gpa);
+        for (0..cs) |y| for (0..cs) |z| for (0..cs) |x| {
+            const b = vol[volumeIndex(x + 1, y + 1, z + 1)];
+            for (0..6) |f| {
+                const face: Face = @enumFromInt(f);
+                const n = face.normal();
+                const nb = vol[
+                    volumeIndex(
+                        @intCast(@as(i32, @intCast(x + 1)) + n[0]),
+                        @intCast(@as(i32, @intCast(y + 1)) + n[1]),
+                        @intCast(@as(i32, @intCast(z + 1)) + n[2]),
+                    )
+                ];
+                if (!b.faceVisible(nb)) continue;
+                try lists[f].append(gpa, .{ .x = @intCast(x), .y = @intCast(y), .z = @intCast(z), .w = 1, .h = 1, .face = face, .block = b });
+            }
+        };
     }
-    const quads = try gpa.alloc(Quad, total);
-    var at: usize = 0;
-    for (lists) |l| {
-        @memcpy(quads[at..][0..l.items.len], l.items);
-        at += l.items.len;
-    }
-    return .{ .quads = quads, .counts = counts };
+
+    return fromLists(gpa, &lists);
 }
 
 // ---
