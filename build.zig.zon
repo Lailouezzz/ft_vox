@@ -25,32 +25,32 @@
     .fingerprint = 0x1c948e9b75b32921, // Changing this has security and trust implications.
     // Tracks the earliest Zig version that the package considers to be a
     // supported use case.
-    .minimum_zig_version = "0.16.0-dev.2682+02142a54d",
+    .minimum_zig_version = "0.16.0",
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
     // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
+        .zmath = .{
+            .url = "git+https://github.com/zig-gamedev/zmath#9e42b04a24c970a297b365f3d3022f92dbf3219d",
+            .hash = "zmath-0.11.0-dev-wjwivTwtAwDOjG2_KGP-HLtHrONfsFfHttalmxFAGVAK",
+        },
         .zglfw = .{
-            .url = "https://github.com/zig-gamedev/zglfw/archive/main.tar.gz",
-            .hash = "zglfw-0.10.0-dev-zgVDNIG4IQBWN_sfMD-xfC9bJS2hbBN2W7jNlDLovcdC",
+            .url = "git+https://github.com/zig-gamedev/zglfw#f04fdbfc5b6d8c9a12025013992ac1d48653931e",
+            .hash = "zglfw-0.10.0-dev-zgVDNNu5IQAk-UK7gIg0LWMmMzxj4sK9xCSTisLhjgI1",
         },
         .znoise = .{
-            .url = "https://github.com/zig-gamedev/znoise/archive/main.tar.gz",
+            .url = "git+https://github.com/zig-gamedev/znoise#01c8b354cc3ef7f2293de75e58d3298a77d7ed06",
             .hash = "znoise-0.3.0-dev-gK1op9ikAQDrS4G22GluyaQaabjGzhdnhV2QyCoLE8z7",
         },
-        .zmath = .{
-            .url = "https://github.com/zig-gamedev/zmath/archive/main.tar.gz",
-            .hash = "zmath-0.11.0-dev-wjwivdMsAwD-xaLj76YHUq3t9JDH-X16xuMTmnDzqbu2",
+        .@"vulkan-zig" = .{
+            .url = "git+https://github.com/Snektron/vulkan-zig#f9688c6f4ebcb930f67044698ddd1322442e714b",
+            .hash = "vulkan-0.0.0-r7Ytx4yGAwDZf0XsT6_L1ol_XUAkyOgOyBqamf8begA0",
         },
         .vulkan_headers = .{
-            .url = "git+https://github.com/KhronosGroup/Vulkan-Headers#74d8a6cb930c68ef617b202c3ff3c59d919e086b",
-            .hash = "N-V-__8AAEmOPgKPg4A_E180o4enTnzBT1MuP4MdCTY4YCOR",
-        },
-        .@"vulkan-zig" = .{
-            .url = "git+https://github.com/Snektron/vulkan-zig#387f016d344549d22ee6076867600164b9381e6d",
-            .hash = "vulkan-0.0.0-r7Ytx79nAwBmZuO_pzuHeDEbxORZ3AfWGYC73RfY6oK7",
+            .url = "git+https://github.com/KhronosGroup/Vulkan-Headers#6802bb4733b63ed5efd3adb308a6c885ef180ea1",
+            .hash = "N-V-__8AAGluhwIkfWs_S_i5ctSYH58cXuq_SYTNZ0nVUUlN",
         },
     },
     .paths = .{
