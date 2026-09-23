@@ -60,4 +60,27 @@ pub fn build(b: *std.Build) void {
     for ([_]*std.Build.Module{ exe_mod, threading, world }) |m| {
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
     }
+
+    // Benchmark du mesher, toujours en ReleaseFast
+    const znoise_fast = b.dependency("znoise", .{ .target = target, .optimize = .ReleaseFast });
+    const world_fast = b.createModule(.{
+        .root_source_file = b.path("src/world/root.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .imports = &.{
+            .{ .name = "znoise", .module = znoise_fast.module("root") },
+            .{ .name = "zmath", .module = zmath },
+        },
+    });
+    world_fast.linkLibrary(znoise_fast.artifact("FastNoiseLite"));
+    const bench = b.addExecutable(.{
+        .name = "bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{.{ .name = "world", .module = world_fast }},
+        }),
+    });
+    b.step("bench", "Benchmark the mesher (ReleaseFast)").dependOn(&b.addRunArtifact(bench).step);
 }
