@@ -64,7 +64,15 @@ pub fn WorkerPool(comptime InType: type, comptime OutType: type) type {
                             .working, .waiting, .ended => unreachable,
                         };
                         log.debug("worker[{d}] working", .{self.id});
-                        if (try task_fn(allocator, io, in)) |out| {
+                        const maybe_out = task_fn(allocator, io, in) catch |err| switch (err) {
+                            error.Canceled => return err,
+                            else => {
+                                log.warn("worker[{d}] task failed: {t}", .{ self.id, err });
+                                continue;
+                            },
+                        };
+                        if (maybe_out) |out| {
+                            // ponytail: `out` leaks if the push fails (OOM or closed output queue).
                             if (out_queue) |queue|
                                 try queue.push(allocator, io, out);
                         }
@@ -567,4 +575,24 @@ test "10 producer 10 consumer one ms job uncancelable shutdown (500 items)" {
         if (sum == ((499 * 500) / 2))
             break;
     }
+}
+
+fn failOnZero(_: Allocator, _: Io, in: u64) anyerror!?u64 {
+    if (in == 0) return error.Boom;
+    return in;
+}
+
+test "failing task does not kill its worker" {
+    const io = testing.io;
+    const allocator = testing.allocator;
+    var in_queue: WorkQueue(u64) = .empty;
+    defer in_queue.deinit(allocator);
+    var out_queue: WorkQueue(u64) = .empty;
+    defer out_queue.deinit(allocator);
+    for ([_]u64{ 0, 1, 2 }) |k| try in_queue.push(allocator, io, k);
+    var pool = WorkerPool(u64, u64).init(&in_queue, &out_queue, 1, failOnZero);
+    defer pool.deinit(allocator, io);
+    try pool.start(allocator, io);
+    pool.shutdown(allocator, io);
+    try testing.expectEqual(2, out_queue.deque.len);
 }

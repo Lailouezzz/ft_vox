@@ -52,11 +52,13 @@ pub fn WorkQueue(comptime T: type) type {
         }
 
         /// Non-blocking: returns null if the queue is empty or the lock is contended.
+        /// Items pushed before `close` are still returned; error.Closed once closed and empty.
         pub fn pop(self: *Self, io: Io) QueueError!?T {
             if (!self.mutex.tryLock()) return null;
             defer self.mutex.unlock(io);
+            if (self.deque.popFront()) |item| return item;
             if (self.closed) return error.Closed;
-            return self.deque.popFront();
+            return null;
         }
 
         /// Blocks until an item is available. Returns error.Closed once closed and empty.
@@ -77,6 +79,8 @@ pub fn WorkQueue(comptime T: type) type {
             self.not_empty.broadcast(io);
         }
 
+        /// Discards every queued item without freeing it: if items own memory,
+        /// pop them one by one instead.
         pub fn drain(self: *Self, io: Io) void {
             self.mutex.lockUncancelable(io);
             defer self.mutex.unlock(io);
@@ -329,4 +333,18 @@ test "close push" {
     try testing.expectError(QueueError.Closed, queue.waitPop(io));
     try testing.expectError(QueueError.Closed, queue.pop(io));
     try testing.expectError(QueueError.Closed, queue.waitPop(io));
+}
+
+test "close keeps queued items" {
+    const io = testing.io;
+    const allocator = testing.allocator;
+    var queue: WorkQueue(u64) = .empty;
+    defer queue.deinit(allocator);
+
+    try queue.push(allocator, io, 1);
+    try queue.push(allocator, io, 2);
+    queue.close(io);
+    try testing.expectEqual(1, queue.pop(io));
+    try testing.expectEqual(2, queue.pop(io));
+    try testing.expectError(QueueError.Closed, queue.pop(io));
 }
