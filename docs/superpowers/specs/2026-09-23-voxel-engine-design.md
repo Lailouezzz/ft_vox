@@ -22,6 +22,26 @@ Date : 2026-09-23 · Branche : `ai` · Zig 0.16.0
   - `FreeList` : une plage de longueur 0 est une opération nulle (meshes
     vides) ; contrat d'erreur de `WorkerPool.TaskFn` documenté ;
   - mesher : mémoire de travail réutilisée par thread (`threadlocal`).
+- **r3 (2026-09-23)** — après les jalons 3–5, relectures et profilage :
+  - pools de workers **non** surdimensionnées : `n = cœurs - 1` workers au
+    total, `mesh = max(1, n / 3)`, `gen = n - mesh`. Mesuré au chargement :
+    10 fps avec 7 + 7 workers sur 8 cœurs (le thread de rendu est affamé),
+    110–140 fps avec 5 + 2 ;
+  - budget de premiers maillages lancés par `update` (64 ; les remaillages
+    après édition ne sont pas limités), `buildVolume` par copies de lignes,
+    chunk vide calculé par le worker de génération (profil : 77 % du thread
+    principal dans `buildVolume` pendant le chargement) ;
+  - ombres : 3 cascades (20 / 64 / 180 blocs), shadow map lue via un push
+    descriptor (Vulkan 1.4), culling par vue (caméra + 3 cascades, faces
+    tournées vers la lumière pour les cascades) ;
+  - réglages en ligne de commande (`--seed`, `--radius`, `--shadow-res`,
+    `--day-length`) ;
+  - contour du bloc visé : pipeline `line_list` de 24 sommets ;
+  - consolidation issue des relectures : recréation atomique de la
+    swapchain, `errdefer` d'initialisation, barrière de profondeur
+    early+late, pas de recréation en boucle si la taille diffère,
+    `WorkerPool.spawnOne` n'enregistre un worker qu'une fois lancé, petits
+    correctifs du ChunkManager.
 
 ## Objectif
 
@@ -162,9 +182,10 @@ ChunkPos ─gen_in─► GenPool ─gen_out─► ChunkManager ─mesh_in─► 
 - Pas de pipe direct : un chunk généré ne peut être maillé qu'une fois ses
   6 voisins générés, c'est le ChunkManager (thread principal) qui fait le
   lien.
-- Nombre de workers de chaque pool fourni par l'appelant via `Config`
-  (`max(1, cœurs - 1)` chacune dans `main`) : un worker inactif dort dans
-  `waitPop`, donc une pool seule occupe tous les cœurs.
+- Nombre de workers de chaque pool fourni par l'appelant via `Config`.
+  `main` en lance `n = cœurs - 1` au total (un cœur reste au rendu) :
+  `mesh = max(1, n / 3)`, `gen = n - mesh`. Surdimensionner les deux pools
+  affame le thread de rendu pendant le chargement (mesuré : 10 fps).
 - Résultats lus sans bloquer avec `pop()` sur `gen_out` et `mesh_out`.
 
 API : `create(gpa, io, Config) !*ChunkManager` / `destroy()`,
@@ -192,8 +213,11 @@ Chaque `update` :
 3. Pour chaque chunk `dirty`, pas `mesh_in_flight`, dans le rayon et dont
    les 6 voisins sont générés (hors de `[0, 8)` en Y = air) : copie du
    volume 34³ (39 Ko) dans le job, `dirty = false`, `mesh_in_flight = true`.
-   Les chunks entièrement vides ne sont pas maillés. Remaillage après
-   édition (`version > 1`) en tête de `mesh_in`, premier maillage en queue.
+   Les chunks entièrement vides (drapeau calculé par le worker de
+   génération) ne sont pas maillés. Au plus `max_mesh_dispatch` (64)
+   premiers maillages par `update` ; les remaillages après édition
+   (`version > 1`) ne sont pas limités et passent en tête de `mesh_in`.
+   `buildVolume` copie par lignes de 32 blocs.
 4. Quand la colonne centrale change : génération des chunks manquants de
    l'anneau rayon + 1, du plus proche au plus loin (chunks édités restaurés
    depuis la table des chunks édités), puis déchargement au-delà de
@@ -245,9 +269,20 @@ Géométrie pilotée par le GPU, sans descriptor :
    `FrameData`, métadonnées, quads, commandes indirectes, compteur.
 
 Soleil et ombres :
-- 3 cascades, chacune culled et dessinée par le même chemin indirect avec
-  le frustum du soleil.
-- Matrices calées sur la grille de texels, PCF 3×3.
+- 3 cascades (jusqu'à 20, 64 et 180 blocs de la caméra), tableau de
+  profondeur D32 d'une couche par cascade, résolution réglable (2048 par
+  défaut).
+- Culling par vue : `cull.comp` tourne pour la caméra puis pour chaque
+  cascade (plans du frustum de la cascade, seules les faces tournées vers
+  la lumière) ; zone de commandes indirectes et compteur par vue.
+- Chaque cascade est dessinée par le même chemin indirect avec
+  `shadow.vert` (profondeur seule, depth clamp, depth bias négatif en
+  reverse-Z).
+- Cascade ajustée par sphère englobante de la tranche de frustum (stable en
+  rotation) et projection orthographique reverse-Z calée sur la grille de
+  texels ; décalage selon la normale d'environ 1,5 texel ; PCF 3×3 avec un
+  sampler de comparaison `GREATER_OR_EQUAL`, bord à 0 (éclairé).
+- La shadow map est liée par un push descriptor (pas de pool ni de sets).
 - Cycle jour/nuit à durée réglable ; lumière de lune faible et ombres
   coupées quand le soleil est sous l'horizon.
 
@@ -255,8 +290,15 @@ Ciel et finition : triangle plein écran, dégradé analytique selon
 l'élévation du soleil + disque solaire ; brouillard vers la couleur du ciel
 en bord de distance de rendu ; tone mapping ACES.
 
-Casse : raycast DDA depuis la caméra, portée 8 blocs, clic gauche casse,
-contour fil de fer (24 sommets) sur le bloc visé.
+Casse : raycast DDA depuis la caméra à chaque frame (le ChunkManager sert
+de `lookup`), portée 8 blocs ; un clic gauche (front montant) casse le bloc
+visé ; contour fil de fer : pipeline `line_list` de 24 sommets générés dans
+le vertex shader, légèrement agrandi, test de profondeur sans écriture.
+
+Réglages : `ft_vox [--seed N] [--radius 4..32] [--shadow-res 512..4096,
+puissance de 2] [--day-length SECONDES]` ; valeurs par défaut pour iGPU
+(rayon 16, ombres 2048, journée de 240 s) ; une option invalide affiche
+l'usage et quitte avec le code 2.
 
 Titre de fenêtre : FPS, chunks chargés, quads dessinés.
 
@@ -286,6 +328,15 @@ Contrôles : vol libre, ZQSD + souris, Shift pour accélérer, Échap quitte.
   N éditions pendant un maillage → 1 remaillage ; résultat dépassé envoyé
   s'il est plus récent que l'affiché, jeté sinon ; bordure marque le
   voisin ; chunk édité déchargé puis rechargé garde ses modifications.
+- rendu (sans GPU) : projection reverse-Z et axe Y de Vulkan ; plans du
+  frustum ; ajustement des cascades (le point devant la caméra tombe dans
+  chaque cascade, plus près du soleil = profondeur plus grande) ; cycle du
+  soleil.
+- réglages : valeurs par défaut, toutes les options, erreurs (option
+  inconnue, valeur manquante, hors bornes).
+- rendu (avec GPU, vérification manuelle ou scriptée avec `xdotool` et
+  des captures) : lancement avec les validation layers, aucun message
+  `error(vulkan)` ni `warning(vulkan)`.
 
 ## Jalons
 
@@ -312,7 +363,10 @@ Chacun compile, passe ses tests, et fait l'objet d'un commit.
    `cull.comp` + `drawIndirectCount`, vertex pulling, éclairage soleil +
    ambiance, brouillard, tone mapping, contrôles caméra, branchement du
    ChunkManager.
-6. Cascaded shadow maps + cycle jour/nuit.
-7. Finitions : stats dans le titre, réglages de qualité pour iGPU
-   (distance de rendu, résolution des ombres) en arguments.
-8. Casse de blocs : raycast caméra, contour, remaillage regroupé.
+6. Consolidation : correctifs des relectures (swapchain, errdefer,
+   barrières, ChunkManager, WorkerPool) et performance du chargement
+   (répartition des workers, budget de maillage, `buildVolume` par lignes).
+7. Cascaded shadow maps + cycle jour/nuit (déjà en place depuis le
+   jalon 5 pour la lumière).
+8. Réglages en ligne de commande.
+9. Casse de blocs : raycast caméra, contour, remaillage regroupé.
