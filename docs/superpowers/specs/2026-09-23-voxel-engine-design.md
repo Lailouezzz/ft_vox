@@ -227,8 +227,10 @@ Géométrie pilotée par le GPU, sans descriptor :
    tient pas dans le budget de la frame est copié et reporté.
 2. Buffer de métadonnées (`ChunkMeta` : origine, premier quad, 6 comptes,
    actif) indexé par slot, 16 384 slots ; mis à jour par
-   `vkCmdUpdateBuffer` dans le command buffer de la frame. Slots et plages
-   libérés seulement quand plus aucune frame en vol ne les utilise.
+   `vkCmdUpdateBuffer` dans le command buffer de la frame. Chaque frame
+   commence par une barrière qui ordonne toutes les lectures GPU des frames
+   précédentes (culling, draw indirect, vertex pulling) avant ses écritures :
+   slots et plages libérés sont donc réutilisables tout de suite.
 3. `FrameData` par frame en vol (host visible) : view-proj, plans du
    frustum, position caméra, soleil, ambiance, brouillard, palette des
    blocs (source unique : `Block.color`), capacité.
