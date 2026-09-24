@@ -60,6 +60,9 @@ Date : 2026-09-23 · Branche : `ai` · Zig 0.16.0
     format/mode de présentation ignoré.
 - **r5 (2026-09-24)** — eau transparente (section « Eau transparente »,
   jalons W1–W3) : l'eau sort du hors-périmètre.
+- **r6 (2026-09-24)** — options `--help` / `-h` (usage détaillé sur la
+  sortie standard, code de sortie 0) et `--no-fog` (brouillard de distance
+  désactivé ; le brouillard sous l'eau reste).
 
 ## Objectif
 
@@ -324,7 +327,12 @@ le vertex shader, légèrement agrandi, test de profondeur sans écriture.
 Réglages : `ft_vox [--seed N] [--radius 4..24] [--shadow-res 512..4096,
 puissance de 2] [--day-length SECONDES]` ; valeurs par défaut pour iGPU
 (rayon 16, ombres 2048, journée de 240 s) ; une option invalide affiche
-l'usage et quitte avec le code 2.
+l'usage et quitte avec le code 2. `--help` / `-h` affiche l'usage détaillé
+(une ligne par option) sur la sortie standard et quitte avec le code 0.
+`--no-fog` désactive le brouillard de distance (le bord du monde chargé
+devient visible) ; le brouillard sous l'eau est conservé. Ces deux options
+ne prennent pas de valeur et se combinent avec les autres dans n'importe
+quel ordre.
 
 Titre de fenêtre : FPS, chunks affichés, quads résidents sur le GPU,
 position.
