@@ -13,7 +13,7 @@ shadow_resolution: u32 = 2048,
 day_length: f32 = 240,
 
 pub const usage =
-    \\usage: ft_vox [--seed N] [--radius 4..32] [--shadow-res 512..4096] [--day-length SECONDS]
+    \\usage: ft_vox [--seed N] [--radius 4..24] [--shadow-res 512..4096] [--day-length SECONDS]
     \\
 ;
 
@@ -32,7 +32,8 @@ pub fn parse(args: []const []const u8) ParseError!Settings {
             s.seed = std.fmt.parseInt(u64, value, 10) catch return error.InvalidValue;
         } else if (std.mem.eql(u8, name, "--radius")) {
             s.radius = std.fmt.parseInt(u16, value, 10) catch return error.InvalidValue;
-            if (s.radius < 4 or s.radius > 32) return error.InvalidValue;
+            // Cap at 24 to keep the GPU chunk-meta/quad buffers within their fixed capacity.
+            if (s.radius < 4 or s.radius > 24) return error.InvalidValue;
         } else if (std.mem.eql(u8, name, "--shadow-res")) {
             s.shadow_resolution = std.fmt.parseInt(u32, value, 10) catch return error.InvalidValue;
             if (s.shadow_resolution < 512 or s.shadow_resolution > 4096 or !std.math.isPowerOfTwo(s.shadow_resolution)) return error.InvalidValue;
@@ -67,6 +68,7 @@ test "errors" {
     try testing.expectError(error.UnknownOption, parse(&.{"--nope"}));
     try testing.expectError(error.MissingValue, parse(&.{"--seed"}));
     try testing.expectError(error.InvalidValue, parse(&.{ "--radius", "99" }));
+    try testing.expectError(error.InvalidValue, parse(&.{ "--radius", "25" }));
     try testing.expectError(error.InvalidValue, parse(&.{ "--shadow-res", "1000" }));
     try testing.expectError(error.InvalidValue, parse(&.{ "--seed", "-1" }));
     try testing.expectError(error.InvalidValue, parse(&.{ "--day-length", "inf" }));
