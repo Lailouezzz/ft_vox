@@ -4,6 +4,13 @@
 // Quad (u, v) corners of the two triangles.
 const vec2 corners[6] = vec2[6](vec2(0, 0), vec2(1, 0), vec2(1, 1), vec2(0, 0), vec2(1, 1), vec2(0, 1));
 
+// Greedy meshing can produce a quad edge that touches the middle of a
+// neighbouring (unmerged) quad's edge -- a T-junction. Floating-point
+// rounding then disagrees on which side of the shared edge a pixel falls,
+// leaving visible cracks. Inflate every quad by a tiny epsilon along its two
+// in-plane axes so neighbouring quads overlap instead of meeting edge to edge.
+const float quad_inflate = 0.001;
+
 // Vertex pulling: world position of this vertex, from gl_VertexIndex (quad and
 // corner) and gl_InstanceIndex (slot * 8 + face).
 vec3 pullVertex(out uint face, out uint block) {
@@ -25,5 +32,6 @@ vec3 pullVertex(out uint face, out uint block) {
     if ((axis == 2u) != positive) c = c.yx;
 
     vec3 base = vec3(p) + (positive ? face_normals[face] : vec3(0));
-    return vec3(m.origin) + base + u * (c.x * size.x) + v * (c.y * size.y);
+    return vec3(m.origin) + base + u * (c.x * (size.x + 2 * quad_inflate) - quad_inflate) +
+        v * (c.y * (size.y + 2 * quad_inflate) - quad_inflate);
 }
