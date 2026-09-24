@@ -1,4 +1,6 @@
 // Shared lighting helpers.
+#ifndef COMMON_GLSL
+#define COMMON_GLSL
 #extension GL_EXT_scalar_block_layout : require
 
 vec3 skyColor(vec3 dir, vec3 sun) {
@@ -23,3 +25,4 @@ vec3 tonemap(vec3 x) {
 
 // Fog colour when the camera is under water.
 const vec3 underwater_fog = vec3(0.04, 0.18, 0.28);
+#endif // COMMON_GLSL

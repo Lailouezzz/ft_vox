@@ -64,6 +64,7 @@ comptime {
     if (cascade_vp_len != Shadows.cascades) @compileError("FrameData.cascade_vp length must equal Shadows.cascades");
     const cascade_planes_len = @typeInfo(@FieldType(FrameData, "cascade_planes")).array.len;
     if (cascade_planes_len != Shadows.cascades * 6) @compileError("FrameData.cascade_planes length must equal Shadows.cascades * 6 planes per cascade");
+    if (world.mesher.groups > 16) @compileError("firstInstance packs slot * 16 + group (pull.glsl >> 4, cull.comp)");
 }
 
 /// Frustum planes (normal pointing inside, xyz·p + w >= 0 inside) of a

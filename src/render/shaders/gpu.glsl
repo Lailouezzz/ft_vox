@@ -1,4 +1,6 @@
 // GPU data shared by the chunk pipelines (cull, chunk, shadow).
+#ifndef GPU_GLSL
+#define GPU_GLSL
 #include "common.glsl"
 
 #extension GL_EXT_buffer_reference : require
@@ -47,3 +49,4 @@ layout(push_constant, scalar) uniform Push {
 
 const vec3 face_normals[6] = vec3[6](
     vec3(1, 0, 0), vec3(-1, 0, 0), vec3(0, 1, 0), vec3(0, -1, 0), vec3(0, 0, 1), vec3(0, 0, -1));
+#endif // GPU_GLSL

@@ -339,7 +339,7 @@ pub fn drawFrame(self: *Renderer, extent: vk.Extent2D, in: FrameInput) !void {
     }
     imageBarrier(cmd, shadow_image, .{ .depth_bit = true }, .depth_attachment_optimal, .depth_read_only_optimal, .{ .late_fragment_tests_bit = true }, .{ .depth_stencil_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_sampled_read_bit = true });
 
-    // 3. Main pass: sky, then chunks.
+    // 3. Main pass: sky, chunks, water, outline.
     const image = self.swapchain.images[image_index];
     imageBarrier(cmd, image, .{ .color_bit = true }, .undefined, .color_attachment_optimal, .{ .color_attachment_output_bit = true }, .{}, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true });
     // The depth stays in RENDERING_LOCAL_READ for the whole pass: the water reads it in place.
