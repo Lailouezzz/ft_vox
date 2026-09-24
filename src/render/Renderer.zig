@@ -44,6 +44,8 @@ pub const FrameInput = struct {
     light: Sun.Lighting,
     /// Shadows are skipped at night (the moon casts none).
     shadows: bool,
+    /// Block to outline (the one the player aims at).
+    target: ?world.BlockPos,
     fog_start: f32,
     fog_end: f32,
 };
@@ -67,6 +69,8 @@ chunk_layout: vk.PipelineLayout,
 cull_pipeline: vk.Pipeline,
 chunk_pipeline: vk.Pipeline,
 shadow_pipeline: vk.Pipeline,
+outline_layout: vk.PipelineLayout,
+outline_pipeline: vk.Pipeline,
 
 pub fn init(gpa: Allocator, ctx: *const Context, extent: vk.Extent2D, options: Options) !Renderer {
     const d = ctx.device;
@@ -133,6 +137,19 @@ pub fn init(gpa: Allocator, ctx: *const Context, extent: vk.Extent2D, options: O
         .depth_clamp = true,
         .depth_bias = true,
     });
+    errdefer d.destroyPipeline(shadow_pipeline, null);
+    const outline_layout = try pipeline.createLayout(ctx, @sizeOf(OutlinePush), .{ .vertex_bit = true }, &.{});
+    errdefer d.destroyPipelineLayout(outline_layout, null);
+    const outline_pipeline = try pipeline.createGraphics(ctx, .{
+        .layout = outline_layout,
+        .vertex = pipeline.spirv("outline.vert"),
+        .fragment = pipeline.spirv("outline.frag"),
+        .color_format = swapchain.format,
+        .depth_format = depth_format,
+        .depth_write = false,
+        .cull_back = false,
+        .topology = .line_list,
+    });
 
     return .{
         .gpa = gpa,
@@ -152,12 +169,16 @@ pub fn init(gpa: Allocator, ctx: *const Context, extent: vk.Extent2D, options: O
         .cull_pipeline = cull_pipeline,
         .chunk_pipeline = chunk_pipeline,
         .shadow_pipeline = shadow_pipeline,
+        .outline_layout = outline_layout,
+        .outline_pipeline = outline_pipeline,
     };
 }
 
 pub fn deinit(self: *Renderer) void {
     const d = self.ctx.device;
     d.deviceWaitIdle() catch {};
+    d.destroyPipeline(self.outline_pipeline, null);
+    d.destroyPipelineLayout(self.outline_layout, null);
     d.destroyPipeline(self.shadow_pipeline, null);
     d.destroyPipeline(self.chunk_pipeline, null);
     d.destroyPipeline(self.cull_pipeline, null);
@@ -201,6 +222,11 @@ fn destroyFrame(ctx: *const Context, f: *Frame) void {
 const SkyPush = extern struct {
     inv_view_proj: zm.Mat,
     sun_dir: [4]f32,
+};
+
+const OutlinePush = extern struct {
+    view_proj: zm.Mat,
+    block: [3]f32,
 };
 
 /// Renders one frame. `extent` is the current framebuffer size (for resizes).
@@ -336,6 +362,13 @@ pub fn drawFrame(self: *Renderer, extent: vk.Extent2D, in: FrameInput) !void {
     push.view = 0;
     cmd.pushConstants(self.chunk_layout, chunk_stages, 0, @sizeOf(gpu.Push), &push);
     cmd.drawIndirectCount(self.draws.handle, 0, self.draw_count.handle, 0, max_draws, @sizeOf(gpu.DrawCmd));
+
+    if (in.target) |t| {
+        const outline: OutlinePush = .{ .view_proj = view_proj, .block = .{ @floatFromInt(t.x), @floatFromInt(t.y), @floatFromInt(t.z) } };
+        cmd.bindPipeline(.graphics, self.outline_pipeline);
+        cmd.pushConstants(self.outline_layout, .{ .vertex_bit = true }, 0, @sizeOf(OutlinePush), &outline);
+        cmd.draw(24, 1, 0, 0);
+    }
 
     cmd.endRendering();
     imageBarrier(cmd, image, .{ .color_bit = true }, .color_attachment_optimal, .present_src_khr, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{}, .{});

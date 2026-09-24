@@ -49,7 +49,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.linkLibrary(zglfw.artifact("glfw"));
 
     // Shaders: GLSL -> SPIR-V with glslc, embedded with @embedFile("<name>").
-    const shaders = [_][]const u8{ "fullscreen.vert", "sky.frag", "cull.comp", "chunk.vert", "chunk.frag", "shadow.vert" };
+    const shaders = [_][]const u8{ "fullscreen.vert", "sky.frag", "cull.comp", "chunk.vert", "chunk.frag", "shadow.vert", "outline.vert", "outline.frag" };
     for (shaders) |name| {
         const glslc = b.addSystemCommand(&.{ "glslc", "--target-env=vulkan1.4", "-O", "-o" });
         const spv = glslc.addOutputFileArg(b.fmt("{s}.spv", .{name}));

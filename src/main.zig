@@ -17,6 +17,8 @@ pub const std_options: std.Options = .{
 const walk_speed: f32 = 12; // blocks per second
 const sprint_factor: f32 = 6;
 const mouse_sensitivity: f32 = 0.0025;
+/// How far the player can reach to break a block.
+const reach: f32 = 8;
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
@@ -51,6 +53,7 @@ pub fn main(init: std.process.Init) !void {
     var last_cursor = window.getCursorPos();
     var last_time = glfw.getTime();
     var title_timer: f64 = 0;
+    var was_clicking = false;
     var frames: u32 = 0;
 
     while (!window.shouldClose()) {
@@ -87,6 +90,14 @@ pub fn main(init: std.process.Init) !void {
 
         sun.advance(dt);
 
+        // Aim and break: left click edge, one block per click.
+        const target = world.raycast(camera.pos, camera.forward(), reach, chunks);
+        const clicking = window.getMouseButton(.left) == .press;
+        if (clicking and !was_clicking) {
+            if (target) |hit| _ = try chunks.breakBlock(hit.pos);
+        }
+        was_clicking = clicking;
+
         // Streaming: hand finished meshes to the GPU, uploads before unloads.
         try chunks.update(.{ .x = @intFromFloat(@floor(camera.pos[0])), .y = @intFromFloat(@floor(camera.pos[1])), .z = @intFromFloat(@floor(camera.pos[2])) });
         for (chunks.takeUploads()) |u| try renderer.chunks.upload(u.pos, u.mesh.quads, u.mesh.counts);
@@ -99,6 +110,7 @@ pub fn main(init: std.process.Init) !void {
             .camera = camera,
             .light = sun.lighting(),
             .shadows = sun.direction()[1] > 0.02,
+            .target = if (target) |hit| hit.pos else null,
             .fog_start = far * 0.6,
             .fog_end = far * 0.95,
         });
