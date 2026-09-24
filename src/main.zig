@@ -102,7 +102,8 @@ pub fn main(init: std.process.Init) !void {
         was_clicking = clicking;
 
         // Streaming: hand finished meshes to the GPU, uploads before unloads.
-        try chunks.update(.{ .x = @intFromFloat(@floor(camera.pos[0])), .y = @intFromFloat(@floor(camera.pos[1])), .z = @intFromFloat(@floor(camera.pos[2])) });
+        const camera_block: world.BlockPos = .{ .x = @intFromFloat(@floor(camera.pos[0])), .y = @intFromFloat(@floor(camera.pos[1])), .z = @intFromFloat(@floor(camera.pos[2])) };
+        try chunks.update(camera_block);
         for (chunks.takeUploads()) |u| try renderer.chunks.upload(u.pos, u.mesh.quads, u.mesh.counts);
         for (chunks.takeUnloads()) |p| try renderer.chunks.remove(p);
 
@@ -114,7 +115,7 @@ pub fn main(init: std.process.Init) !void {
             .light = sun.lighting(),
             .shadows = sun.direction()[1] > 0.02,
             .target = if (target) |hit| hit.pos else null,
-            .underwater = chunks.blockAt(.{ .x = @intFromFloat(@floor(camera.pos[0])), .y = @intFromFloat(@floor(camera.pos[1])), .z = @intFromFloat(@floor(camera.pos[2])) }) == .water,
+            .underwater = chunks.blockAt(camera_block) == .water,
             .fog_start = far * 0.6,
             .fog_end = far * 0.95,
         });
