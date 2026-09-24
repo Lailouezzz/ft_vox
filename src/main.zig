@@ -26,6 +26,10 @@ pub fn main(init: std.process.Init) !void {
 
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     const settings = Settings.parse(args[1..]) catch |err| {
+        if (err == error.HelpRequested) {
+            try std.Io.File.stdout().writeStreamingAll(io, Settings.help);
+            std.process.exit(0);
+        }
         std.debug.print("ft_vox: {t}\n{s}", .{ err, Settings.usage });
         std.process.exit(2);
     };
@@ -115,14 +119,17 @@ pub fn main(init: std.process.Init) !void {
         const above_block: world.BlockPos = .{ .x = camera_block.x, .y = camera_block.y + 1, .z = camera_block.z };
         const underwater = chunks.blockAt(camera_block) == .water and
             (chunks.blockAt(above_block) == .water or camera.pos[1] < @as(f32, @floatFromInt(camera_block.y)) + 1 - water_drop);
+        // Distances far past anything ever drawn: smoothstep(start, end, ...) stays 0, i.e. no fog.
+        const fog_start: f32 = if (settings.fog) far * 0.6 else 1e9;
+        const fog_end: f32 = if (settings.fog) far * 0.95 else 2e9;
         try renderer.drawFrame(extent, .{
             .camera = camera,
             .light = sun.lighting(),
             .shadows = sun.direction()[1] > 0.02,
             .target = if (target) |hit| hit.pos else null,
             .underwater = underwater,
-            .fog_start = far * 0.6,
-            .fog_end = far * 0.95,
+            .fog_start = fog_start,
+            .fog_end = fog_end,
         });
 
         frames += 1;
