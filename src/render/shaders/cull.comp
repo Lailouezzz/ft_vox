@@ -15,6 +15,9 @@ void main() {
     vec3 lo = vec3(m.origin);
     vec3 hi = lo + 32.0;
     for (uint i = 0; i < 6; i++) {
+        // Skip the cascade's near plane (index 4): depth clamp keeps casters in front of
+        // it, but culling them here would drop casters between the sun and the cascade.
+        if (pc.view != 0 && i == 4) continue;
         vec4 p = pc.view == 0 ? pc.frame.planes[i] : pc.frame.cascade_planes[(pc.view - 1) * 6 + i];
         vec3 v = mix(lo, hi, greaterThan(p.xyz, vec3(0))); // corner furthest along the normal
         if (dot(p.xyz, v) + p.w < 0.0) return;

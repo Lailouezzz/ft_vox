@@ -15,6 +15,8 @@ views: []vk.ImageView,
 /// Per image rather than per frame, since present gives no signal of when it releases it.
 render_done: []vk.Semaphore,
 
+/// `old` (the previous swapchain, or null) is only retired: the caller destroys
+/// it once the new one exists, so a failure here leaves it usable.
 pub fn init(ctx: *const Context, gpa: Allocator, extent: vk.Extent2D, old: vk.SwapchainKHR) !Swapchain {
     const caps = try ctx.instance.getPhysicalDeviceSurfaceCapabilitiesKHR(ctx.pdev, ctx.surface);
     const format = try pickFormat(ctx, gpa);
@@ -72,8 +74,7 @@ pub fn init(ctx: *const Context, gpa: Allocator, extent: vk.Extent2D, old: vk.Sw
     return .{ .handle = handle, .format = format.format, .extent = actual, .images = images, .views = views, .render_done = render_done };
 }
 
-/// `old` (the previous swapchain, or null) is only retired: the caller destroys
-/// it once the new one exists, so a failure here leaves it usable.
+/// Destroys the swapchain, its image views, and per-image semaphores.
 pub fn deinit(self: *Swapchain, ctx: *const Context, gpa: Allocator) void {
     for (self.views, self.render_done) |v, s| {
         ctx.device.destroyImageView(v, null);

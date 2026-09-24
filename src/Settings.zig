@@ -38,7 +38,7 @@ pub fn parse(args: []const []const u8) ParseError!Settings {
             if (s.shadow_resolution < 512 or s.shadow_resolution > 4096 or !std.math.isPowerOfTwo(s.shadow_resolution)) return error.InvalidValue;
         } else if (std.mem.eql(u8, name, "--day-length")) {
             s.day_length = std.fmt.parseFloat(f32, value) catch return error.InvalidValue;
-            if (!(s.day_length > 0)) return error.InvalidValue;
+            if (!std.math.isFinite(s.day_length) or s.day_length <= 0) return error.InvalidValue;
         } else return error.UnknownOption;
     }
     return s;
@@ -69,4 +69,7 @@ test "errors" {
     try testing.expectError(error.InvalidValue, parse(&.{ "--radius", "99" }));
     try testing.expectError(error.InvalidValue, parse(&.{ "--shadow-res", "1000" }));
     try testing.expectError(error.InvalidValue, parse(&.{ "--seed", "-1" }));
+    try testing.expectError(error.InvalidValue, parse(&.{ "--day-length", "inf" }));
+    try testing.expectError(error.InvalidValue, parse(&.{ "--day-length", "-inf" }));
+    try testing.expectError(error.InvalidValue, parse(&.{ "--day-length", "nan" }));
 }

@@ -25,6 +25,8 @@ pub fn init(ctx: *const Context, resolution: u32) !Shadows {
     var image: Image = try .init(ctx, .{ .width = resolution, .height = resolution }, format, .{ .depth_stencil_attachment_bit = true, .sampled_bit = true }, .{ .depth_bit = true }, cascades);
     errdefer image.deinit(ctx);
     var layer_views: [cascades]vk.ImageView = undefined;
+    var views_created: usize = 0;
+    errdefer for (layer_views[0..views_created]) |v| ctx.device.destroyImageView(v, null);
     for (&layer_views, 0..) |*v, i| {
         v.* = try ctx.device.createImageView(&.{
             .image = image.image,
@@ -33,6 +35,7 @@ pub fn init(ctx: *const Context, resolution: u32) !Shadows {
             .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
             .subresource_range = .{ .aspect_mask = .{ .depth_bit = true }, .base_mip_level = 0, .level_count = 1, .base_array_layer = @intCast(i), .layer_count = 1 },
         }, null);
+        views_created += 1;
     }
     // Reverse-Z: a fragment is lit when its depth >= the stored occluder depth.
     // Outside the map the border (depth 0) leaves everything lit.
