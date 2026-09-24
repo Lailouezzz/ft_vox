@@ -25,9 +25,17 @@ void main() {
 
     // Reverse-Z infinite perspective: depth = near / forward view distance.
     float near = pc.frame.fog.z;
-    float floor_depth = max(subpassLoad(scene_depth).r, 1e-7);
-    float thickness = max(near / floor_depth - near / gl_FragCoord.z, 0.0);
-    thickness *= dist * gl_FragCoord.z / near;
+    float thickness;
+    if (pc.frame.fog.w != 0.0) {
+        // Camera under water: this face is the surface seen from below, so
+        // the water between the camera and it is just the view-ray distance
+        // -- there is no further (opaque) depth sample behind it to diff.
+        thickness = dist;
+    } else {
+        float floor_depth = max(subpassLoad(scene_depth).r, 1e-7);
+        thickness = max(near / floor_depth - near / gl_FragCoord.z, 0.0);
+        thickness *= dist * gl_FragCoord.z / near;
+    }
     float murk = 1.0 - exp(-thickness * absorption);
 
     float ndl = max(dot(n, sun), 0.0);
