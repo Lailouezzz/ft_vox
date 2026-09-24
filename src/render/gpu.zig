@@ -1,5 +1,9 @@
 //! CPU mirrors of the GPU structures declared in shaders/gpu.glsl (scalar layout).
 const zm = @import("zmath");
+const world = @import("world");
+// No import cycle: Shadows.zig only reaches Context.zig and Image.zig, neither
+// of which imports gpu.zig.
+const Shadows = @import("Shadows.zig");
 
 pub const FrameData = extern struct {
     view_proj: zm.Mat,
@@ -43,6 +47,22 @@ pub const Push = extern struct {
     /// 0: camera, 1..3: shadow cascades.
     view: u32,
 };
+
+// Comptime layout checks: fail the build if these CPU mirrors drift from
+// src/render/shaders/gpu.glsl.
+comptime {
+    if (@sizeOf(ChunkMeta) != 44) @compileError("ChunkMeta size drifted from gpu.glsl's ChunkMeta");
+    if (@offsetOf(Push, "view") != 40) @compileError("Push.view offset drifted from gpu.glsl's Push");
+    if (@offsetOf(FrameData, "chunk_capacity") != 896) @compileError("FrameData.chunk_capacity offset drifted from gpu.glsl's FrameData");
+    if (@offsetOf(FrameData, "palette") != 240) @compileError("FrameData.palette offset drifted from gpu.glsl's FrameData");
+    const palette_len = @typeInfo(@FieldType(FrameData, "palette")).array.len;
+    const block_count = @typeInfo(world.Block).@"enum".fields.len;
+    if (palette_len != block_count) @compileError("FrameData.palette length must equal world.Block's field count");
+    const cascade_vp_len = @typeInfo(@FieldType(FrameData, "cascade_vp")).array.len;
+    if (cascade_vp_len != Shadows.cascades) @compileError("FrameData.cascade_vp length must equal Shadows.cascades");
+    const cascade_planes_len = @typeInfo(@FieldType(FrameData, "cascade_planes")).array.len;
+    if (cascade_planes_len != Shadows.cascades * 6) @compileError("FrameData.cascade_planes length must equal Shadows.cascades * 6 planes per cascade");
+}
 
 /// Frustum planes (normal pointing inside, xyz·p + w >= 0 inside) of a
 /// row-vector view-projection matrix with reverse-Z depth in [0, 1].
