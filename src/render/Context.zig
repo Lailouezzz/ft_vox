@@ -186,31 +186,7 @@ fn missingFeature(instance: vk.InstanceProxy, pdev: vk.PhysicalDevice) ?[]const 
     };
     inline for (checks) |c| if (c[0] != .true) return c[1];
     // Transparent water reads the depth attachment in place.
-    var p14: vk.PhysicalDeviceVulkan14Properties = .{
-        .line_sub_pixel_precision_bits = 0,
-        .max_vertex_attrib_divisor = 0,
-        .supports_non_zero_first_instance = .false,
-        .max_push_descriptors = 0,
-        .dynamic_rendering_local_read_depth_stencil_attachments = .false,
-        .dynamic_rendering_local_read_multisampled_attachments = .false,
-        .early_fragment_multisample_coverage_after_sample_counting = .false,
-        .early_fragment_sample_mask_test_before_sample_counting = .false,
-        .depth_stencil_swizzle_one_support = .false,
-        .polygon_mode_point_size = .false,
-        .non_strict_single_pixel_wide_lines_use_parallelogram = .false,
-        .non_strict_wide_lines_use_parallelogram = .false,
-        .block_texel_view_compatible_multiple_layers = .false,
-        .max_combined_image_sampler_descriptor_count = 0,
-        .fragment_shading_rate_clamp_combiner_inputs = .false,
-        .default_robustness_storage_buffers = .device_default,
-        .default_robustness_uniform_buffers = .device_default,
-        .default_robustness_vertex_inputs = .device_default,
-        .default_robustness_images = .device_default,
-        .copy_src_layout_count = 0,
-        .copy_dst_layout_count = 0,
-        .optimal_tiling_layout_uuid = @splat(0),
-        .identical_memory_type_requirements = .false,
-    };
+    var p14: vk.PhysicalDeviceVulkan14Properties = std.mem.zeroInit(vk.PhysicalDeviceVulkan14Properties, .{});
     var p2: vk.PhysicalDeviceProperties2 = .{ .p_next = &p14, .properties = undefined };
     instance.getPhysicalDeviceProperties2(pdev, &p2);
     if (p14.dynamic_rendering_local_read_depth_stencil_attachments != .true) return "dynamicRenderingLocalReadDepthStencilAttachments";
