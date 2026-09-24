@@ -22,6 +22,10 @@ pub const frames_in_flight = 2;
 const depth_format: vk.Format = .d32_sfloat;
 /// Views culled each frame: the camera, then one per shadow cascade.
 const views = 1 + Shadows.cascades;
+/// Indirect range filled with the camera's water groups (after the culled views).
+const water_view = views;
+/// Indirect ranges and counters: one per culled view, plus water.
+const regions = views + 1;
 const max_draws = ChunkBuffers.max_chunks * 6;
 const chunk_stages: vk.ShaderStageFlags = .{ .compute_bit = true, .vertex_bit = true, .fragment_bit = true };
 
@@ -91,9 +95,9 @@ pub fn init(gpa: Allocator, ctx: *const Context, extent: vk.Extent2D, options: O
     errdefer chunks.deinit(ctx);
     var shadows: Shadows = try .init(ctx, options.shadow_resolution);
     errdefer shadows.deinit(ctx);
-    var draws: Buffer = try .init(ctx, views * max_draws * @sizeOf(gpu.DrawCmd), .{ .storage_buffer_bit = true, .indirect_buffer_bit = true }, false);
+    var draws: Buffer = try .init(ctx, regions * max_draws * @sizeOf(gpu.DrawCmd), .{ .storage_buffer_bit = true, .indirect_buffer_bit = true }, false);
     errdefer draws.deinit(ctx);
-    var draw_count: Buffer = try .init(ctx, views * @sizeOf(u32), .{ .storage_buffer_bit = true, .indirect_buffer_bit = true, .transfer_dst_bit = true }, false);
+    var draw_count: Buffer = try .init(ctx, regions * @sizeOf(u32), .{ .storage_buffer_bit = true, .indirect_buffer_bit = true, .transfer_dst_bit = true }, false);
     errdefer draw_count.deinit(ctx);
 
     // The shadow map is bound with a push descriptor: no pool, no sets.
@@ -263,7 +267,7 @@ pub fn drawFrame(self: *Renderer, extent: vk.Extent2D, in: FrameInput) !void {
         .count = self.draw_count.address,
         .view = 0,
     };
-    cmd.fillBuffer(self.draw_count.handle, 0, views * @sizeOf(u32), 0);
+    cmd.fillBuffer(self.draw_count.handle, 0, regions * @sizeOf(u32), 0);
     ChunkBuffers.barrier(cmd, .{ .copy_bit = true, .clear_bit = true }, .{ .transfer_write_bit = true }, .{ .compute_shader_bit = true, .vertex_shader_bit = true }, .{ .shader_storage_read_bit = true, .shader_storage_write_bit = true });
     cmd.bindPipeline(.compute, self.cull_pipeline);
     const groups = std.math.divCeil(u32, self.chunks.slot_high, 64) catch unreachable;
@@ -362,6 +366,10 @@ pub fn drawFrame(self: *Renderer, extent: vk.Extent2D, in: FrameInput) !void {
     push.view = 0;
     cmd.pushConstants(self.chunk_layout, chunk_stages, 0, @sizeOf(gpu.Push), &push);
     cmd.drawIndirectCount(self.draws.handle, 0, self.draw_count.handle, 0, max_draws, @sizeOf(gpu.DrawCmd));
+    // Water groups, still drawn opaque with the chunk pipeline (transparency comes next).
+    push.view = water_view;
+    cmd.pushConstants(self.chunk_layout, chunk_stages, 0, @sizeOf(gpu.Push), &push);
+    cmd.drawIndirectCount(self.draws.handle, water_view * max_draws * @sizeOf(gpu.DrawCmd), self.draw_count.handle, water_view * @sizeOf(u32), max_draws, @sizeOf(gpu.DrawCmd));
 
     if (in.target) |t| {
         const outline: OutlinePush = .{ .view_proj = view_proj, .block = .{ @floatFromInt(t.x), @floatFromInt(t.y), @floatFromInt(t.z) } };
@@ -425,7 +433,7 @@ fn writeFrameData(self: *Renderer, frame: *Frame, in: FrameInput, view_proj: zm.
         .sun_dir = .{ l.dir[0], l.dir[1], l.dir[2], 0 },
         .sun_color = .{ l.color[0], l.color[1], l.color[2], 0 },
         .ambient = .{ l.ambient[0], l.ambient[1], l.ambient[2], 0 },
-        .fog = .{ in.fog_start, in.fog_end, 0, 0 },
+        .fog = .{ in.fog_start, in.fog_end, cam.near, 0 },
         .palette = palette,
         .cascade_vp = cascade_vp,
         .cascade_planes = cascade_planes,

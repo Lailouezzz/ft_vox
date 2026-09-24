@@ -22,7 +22,7 @@ pub const max_chunks = 16 * 1024;
 pub const staging_size = 16 * 1024 * 1024;
 
 const Slot = struct { index: u32, range: world.FreeList.Range };
-const Pending = struct { pos: world.ChunkPos, quads: []Quad, counts: [6]u32 };
+const Pending = struct { pos: world.ChunkPos, quads: []Quad, counts: [world.mesher.groups]u32 };
 
 gpa: Allocator,
 quads: Buffer,
@@ -58,7 +58,7 @@ pub fn deinit(self: *ChunkBuffers, ctx: *const Context) void {
 }
 
 /// Queues `quads` (copied) as the new mesh of `pos`, replacing any older one.
-pub fn upload(self: *ChunkBuffers, pos: world.ChunkPos, quads: []const Quad, counts: [6]u32) !void {
+pub fn upload(self: *ChunkBuffers, pos: world.ChunkPos, quads: []const Quad, counts: [world.mesher.groups]u32) !void {
     self.dropPending(pos);
     const copy = try self.gpa.dupe(Quad, quads);
     errdefer self.gpa.free(copy);

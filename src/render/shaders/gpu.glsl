@@ -11,7 +11,7 @@ layout(buffer_reference, scalar) readonly buffer FrameData {
     vec4 sun_dir;        // towards the light (sun by day, moon by night)
     vec4 sun_color;
     vec4 ambient;
-    vec4 fog;            // x: start, y: end (blocks)
+    vec4 fog;            // x: start, y: end (blocks), z: camera near plane, w: 1 under water
     vec4 palette[8];     // block albedo, indexed by Block
     mat4 cascade_vp[3];
     vec4 cascade_planes[18]; // 6 planes per cascade
@@ -25,7 +25,7 @@ layout(buffer_reference, scalar) readonly buffer FrameData {
 struct ChunkMeta {
     ivec3 origin;        // world block coordinates of the chunk's min corner
     uint first_quad;
-    uint counts[6];      // quads per face, in Face order
+    uint counts[12];     // quads per group: 6 opaque faces, then 6 water faces, in Face order
     uint enabled;
 };
 layout(buffer_reference, scalar) readonly buffer Metas { ChunkMeta m[]; };
@@ -33,7 +33,7 @@ layout(buffer_reference, scalar) readonly buffer Quads { uvec2 q[]; };
 
 struct DrawCmd { uint vertex_count; uint instance_count; uint first_vertex; uint first_instance; };
 layout(buffer_reference, scalar) writeonly buffer Draws { DrawCmd d[]; };
-layout(buffer_reference, scalar) buffer Count { uint n[4]; }; // one counter per view
+layout(buffer_reference, scalar) buffer Count { uint n[5]; }; // one counter per view
 
 // One push-constant block for every chunk pipeline.
 layout(push_constant, scalar) uniform Push {
@@ -42,7 +42,7 @@ layout(push_constant, scalar) uniform Push {
     Quads quads;
     Draws draws;
     Count count;
-    uint view;           // 0: camera, 1..3: shadow cascades
+    uint view;           // 0: camera (opaque), 1..3: shadow cascades, 4: camera (water)
 } pc;
 
 const vec3 face_normals[6] = vec3[6](

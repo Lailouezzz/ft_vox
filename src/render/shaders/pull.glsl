@@ -11,15 +11,19 @@ const vec2 corners[6] = vec2[6](vec2(0, 0), vec2(1, 0), vec2(1, 1), vec2(0, 0), 
 // in-plane axes so neighbouring quads overlap instead of meeting edge to edge.
 const float quad_inflate = 0.001;
 
+// How far the top of surface water sits below the block's top.
+const float water_drop = 0.125;
+
 // Vertex pulling: world position of this vertex, from gl_VertexIndex (quad and
-// corner) and gl_InstanceIndex (slot * 8 + face).
+// corner) and gl_InstanceIndex (slot * 16 + group).
 vec3 pullVertex(out uint face, out uint block) {
     uvec2 q = pc.quads.q[gl_VertexIndex / 6];
     uvec3 p = uvec3(q.x & 63u, (q.x >> 6) & 63u, (q.x >> 12) & 63u);
     vec2 size = vec2((q.x >> 18) & 63u, (q.x >> 24) & 63u);
     face = (q.x >> 30) | ((q.y & 1u) << 2);
     block = (q.y >> 1) & 255u;
-    ChunkMeta m = pc.metas.m[gl_InstanceIndex >> 3];
+    bool surface = ((q.y >> 9) & 1u) != 0u; // bit 41: water with no water above
+    ChunkMeta m = pc.metas.m[gl_InstanceIndex >> 4];
 
     // Width/height axes: ±X -> (z, y), ±Y -> (x, z), ±Z -> (x, y).
     uint axis = face >> 1;
@@ -32,6 +36,10 @@ vec3 pullVertex(out uint face, out uint block) {
     if ((axis == 2u) != positive) c = c.yx;
 
     vec3 base = vec3(p) + (positive ? face_normals[face] : vec3(0));
-    return vec3(m.origin) + base + u * (c.x * (size.x + 2 * quad_inflate) - quad_inflate) +
+    vec3 pos = vec3(m.origin) + base + u * (c.x * (size.x + 2 * quad_inflate) - quad_inflate) +
         v * (c.y * (size.y + 2 * quad_inflate) - quad_inflate);
+    // Surface water sits 1/8 block lower: its whole top face, and the top edge
+    // of its side faces (v runs along y for ±X and ±Z faces).
+    if (surface && (face == 2u || (axis != 1u && c.y == 1.0))) pos.y -= water_drop;
+    return pos;
 }

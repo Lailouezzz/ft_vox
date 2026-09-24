@@ -12,6 +12,7 @@ pub const FrameData = extern struct {
     sun_dir: [4]f32,
     sun_color: [4]f32,
     ambient: [4]f32,
+    /// x: fog start, y: fog end (blocks), z: camera near plane, w: 1 when the camera is under water.
     fog: [4]f32,
     palette: [8][4]f32,
     cascade_vp: [3]zm.Mat,
@@ -26,7 +27,8 @@ pub const FrameData = extern struct {
 pub const ChunkMeta = extern struct {
     origin: [3]i32,
     first_quad: u32,
-    counts: [6]u32,
+    /// Quads per group: 6 opaque faces, then 6 water faces (`world.mesher.groups`).
+    counts: [world.mesher.groups]u32,
     enabled: u32,
 };
 
@@ -44,14 +46,14 @@ pub const Push = extern struct {
     quads: u64,
     draws: u64,
     count: u64,
-    /// 0: camera, 1..3: shadow cascades.
+    /// Culling/drawing view: 0 camera (opaque), 1..3 shadow cascades, 4 camera (water).
     view: u32,
 };
 
 // Comptime layout checks: fail the build if these CPU mirrors drift from
 // src/render/shaders/gpu.glsl.
 comptime {
-    if (@sizeOf(ChunkMeta) != 44) @compileError("ChunkMeta size drifted from gpu.glsl's ChunkMeta");
+    if (@sizeOf(ChunkMeta) != 68) @compileError("ChunkMeta size drifted from gpu.glsl's ChunkMeta");
     if (@offsetOf(Push, "view") != 40) @compileError("Push.view offset drifted from gpu.glsl's Push");
     if (@offsetOf(FrameData, "chunk_capacity") != 896) @compileError("FrameData.chunk_capacity offset drifted from gpu.glsl's FrameData");
     if (@offsetOf(FrameData, "palette") != 240) @compileError("FrameData.palette offset drifted from gpu.glsl's FrameData");
