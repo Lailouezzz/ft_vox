@@ -42,6 +42,15 @@ Date : 2026-09-23 · Branche : `ai` · Zig 0.16.0
     early+late, pas de recréation en boucle si la taille diffère,
     `WorkerPool.spawnOne` n'enregistre un worker qu'une fois lancé, petits
     correctifs du ChunkManager.
+- **r4 (2026-09-24)** — retours d'usage et relectures des jalons 6–9 :
+  - T-jonctions du greedy meshing (pixels de ciel visibles entre deux
+    blocs) corrigées : chaque quad est élargi d'environ 1/1000 de bloc sur
+    ses deux axes dans le vertex shader ;
+  - clic de casse : GLFW en mode « sticky mouse buttons », pour qu'un clic
+    plus court qu'une frame ne soit pas perdu ;
+  - culling des cascades sans plan proche (le depth clamp garde les
+    obstacles entre le soleil et la cascade) ; `--day-length` refuse les
+    valeurs non finies.
 
 ## Objectif
 
@@ -158,6 +167,10 @@ Interfaces :
 - Quad `u64` : x, y, z (3 × 6 bits), largeur, hauteur (2 × 6 bits),
   face (3 bits), type de bloc (8 bits).
 - Sortie rangée par direction de face : 6 plages par chunk.
+- T-jonctions : là où un sommet d'un quad tombe au milieu de l'arête d'un
+  quad voisin, les arrondis de rastérisation peuvent laisser un pixel non
+  couvert. Le vertex shader élargit chaque quad d'environ 1/1000 de bloc
+  sur ses deux axes ; le chevauchement est coplanaire et invisible.
 - `zig build bench` : temps de maillage par chunk, cible < 200 µs en
   ReleaseFast.
 
@@ -292,7 +305,8 @@ en bord de distance de rendu ; tone mapping ACES.
 
 Casse : raycast DDA depuis la caméra à chaque frame (le ChunkManager sert
 de `lookup`), portée 8 blocs ; un clic gauche (front montant) casse le bloc
-visé ; contour fil de fer : pipeline `line_list` de 24 sommets générés dans
+visé (GLFW en mode « sticky mouse buttons » : un clic plus court qu'une
+frame n'est pas perdu) ; contour fil de fer : pipeline `line_list` de 24 sommets générés dans
 le vertex shader, légèrement agrandi, test de profondeur sans écriture.
 
 Réglages : `ft_vox [--seed N] [--radius 4..32] [--shadow-res 512..4096,
