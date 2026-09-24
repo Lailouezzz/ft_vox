@@ -114,6 +114,7 @@ pub fn main(init: std.process.Init) !void {
             .light = sun.lighting(),
             .shadows = sun.direction()[1] > 0.02,
             .target = if (target) |hit| hit.pos else null,
+            .underwater = chunks.blockAt(.{ .x = @intFromFloat(@floor(camera.pos[0])), .y = @intFromFloat(@floor(camera.pos[1])), .z = @intFromFloat(@floor(camera.pos[2])) }) == .water,
             .fog_start = far * 0.6,
             .fog_end = far * 0.95,
         });

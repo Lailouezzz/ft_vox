@@ -21,9 +21,11 @@ float sunVisibility(vec3 world_pos, vec3 n, float dist) {
     return lit / 9.0;
 }
 
+const float underwater_fog_end = 24.0;
 
-// Fog towards the sky.
+// Fog towards the sky, or towards deep blue when the camera is under water.
 vec3 applyFog(vec3 color, vec3 to_frag, float dist) {
+    if (pc.frame.fog.w != 0.0) return mix(color, underwater_fog, smoothstep(0.0, underwater_fog_end, dist));
     float fog = smoothstep(pc.frame.fog.x, pc.frame.fog.y, dist);
     return mix(color, skyColor(normalize(to_frag), pc.frame.sun_dir.xyz), fog);
 }

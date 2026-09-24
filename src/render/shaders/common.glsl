@@ -20,3 +20,6 @@ vec3 skyColor(vec3 dir, vec3 sun) {
 vec3 tonemap(vec3 x) {
     return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
 }
+
+// Fog colour when the camera is under water.
+const vec3 underwater_fog = vec3(0.04, 0.18, 0.28);

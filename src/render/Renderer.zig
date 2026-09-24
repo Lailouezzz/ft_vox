@@ -50,6 +50,8 @@ pub const FrameInput = struct {
     shadows: bool,
     /// Block to outline (the one the player aims at).
     target: ?world.BlockPos,
+    /// The camera is inside a water block: blue fog and tint.
+    underwater: bool,
     fog_start: f32,
     fog_end: f32,
 };
@@ -368,7 +370,7 @@ pub fn drawFrame(self: *Renderer, extent: vk.Extent2D, in: FrameInput) !void {
     setViewport(cmd, ext);
 
     const d_sun = in.light.dir;
-    const sky: SkyPush = .{ .inv_view_proj = zm.inverse(view_proj), .sun_dir = .{ d_sun[0], d_sun[1], d_sun[2], 0 } };
+    const sky: SkyPush = .{ .inv_view_proj = zm.inverse(view_proj), .sun_dir = .{ d_sun[0], d_sun[1], d_sun[2], if (in.underwater) 1 else 0 } };
     cmd.bindPipeline(.graphics, self.sky_pipeline);
     cmd.pushConstants(self.sky_layout, .{ .fragment_bit = true }, 0, @sizeOf(SkyPush), &sky);
     cmd.draw(3, 1, 0, 0);
@@ -483,7 +485,7 @@ fn writeFrameData(self: *Renderer, frame: *Frame, in: FrameInput, view_proj: zm.
         .sun_dir = .{ l.dir[0], l.dir[1], l.dir[2], 0 },
         .sun_color = .{ l.color[0], l.color[1], l.color[2], 0 },
         .ambient = .{ l.ambient[0], l.ambient[1], l.ambient[2], 0 },
-        .fog = .{ in.fog_start, in.fog_end, cam.near, 0 },
+        .fog = .{ in.fog_start, in.fog_end, cam.near, if (in.underwater) 1 else 0 },
         .palette = palette,
         .cascade_vp = cascade_vp,
         .cascade_planes = cascade_planes,
