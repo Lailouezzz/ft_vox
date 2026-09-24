@@ -9,6 +9,8 @@ const vec2 corners[6] = vec2[6](vec2(0, 0), vec2(1, 0), vec2(1, 1), vec2(0, 0), 
 // rounding then disagrees on which side of the shared edge a pixel falls,
 // leaving visible cracks. Inflate every quad by a tiny epsilon along its two
 // in-plane axes so neighbouring quads overlap instead of meeting edge to edge.
+// Water is excluded: it blends without depth writes, so an overlap would
+// blend the same pixel twice.
 const float quad_inflate = 0.001;
 
 // How far the top of surface water sits below the block's top.
@@ -36,8 +38,9 @@ vec3 pullVertex(out uint face, out uint block) {
     if ((axis == 2u) != positive) c = c.yx;
 
     vec3 base = vec3(p) + (positive ? face_normals[face] : vec3(0));
-    vec3 pos = vec3(m.origin) + base + u * (c.x * (size.x + 2 * quad_inflate) - quad_inflate) +
-        v * (c.y * (size.y + 2 * quad_inflate) - quad_inflate);
+    float inflate = block == 5u ? 0.0 : quad_inflate;
+    vec3 pos = vec3(m.origin) + base + u * (c.x * (size.x + 2 * inflate) - inflate) +
+        v * (c.y * (size.y + 2 * inflate) - inflate);
     // Surface water sits 1/8 block lower: its whole top face, and the top edge
     // of its side faces (v runs along y for ±X and ±Z faces).
     if (surface && (face == 2u || (axis != 1u && c.y == 1.0))) pos.y -= water_drop;
