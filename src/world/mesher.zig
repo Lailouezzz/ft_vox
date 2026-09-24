@@ -316,6 +316,74 @@ test "buildVolume copies neighbor borders" {
     try testing.expectEqual(Block.air, vol[volumeIndex(0, 4, 5)]);
 }
 
+test "buildVolume places the center and all six neighbour layers" {
+    var center: Chunk = .air;
+    center.set(.{ .x = 1, .y = 2, .z = 3 }, .stone);
+    center.set(.{ .x = 31, .y = 0, .z = 30 }, .dirt);
+
+    var px: Chunk = .air;
+    px.set(.{ .x = 0, .y = 5, .z = 9 }, .grass); // copied layer (x=0)
+    px.set(.{ .x = 1, .y = 1, .z = 1 }, .sand); // must NOT be copied
+
+    var nx: Chunk = .air;
+    nx.set(.{ .x = 31, .y = 5, .z = 9 }, .dirt); // copied layer (x=31)
+    nx.set(.{ .x = 30, .y = 1, .z = 1 }, .sand);
+
+    var py: Chunk = .air;
+    py.set(.{ .x = 5, .y = 0, .z = 9 }, .water); // copied layer (y=0)
+    py.set(.{ .x = 1, .y = 1, .z = 1 }, .sand);
+
+    var ny: Chunk = .air;
+    ny.set(.{ .x = 5, .y = 31, .z = 9 }, .log); // copied layer (y=31)
+    ny.set(.{ .x = 1, .y = 30, .z = 1 }, .sand);
+
+    var pz: Chunk = .air;
+    pz.set(.{ .x = 5, .y = 9, .z = 0 }, .leaves); // copied layer (z=0)
+    pz.set(.{ .x = 1, .y = 1, .z = 1 }, .sand);
+
+    var nz: Chunk = .air;
+    nz.set(.{ .x = 5, .y = 9, .z = 31 }, .stone); // copied layer (z=31)
+    nz.set(.{ .x = 1, .y = 1, .z = 30 }, .sand);
+
+    var vol: Volume = undefined;
+    buildVolume(&center, .{ &px, &nx, &py, &ny, &pz, &nz }, &vol);
+
+    // Center copied verbatim, shifted by +1.
+    try testing.expectEqual(Block.stone, vol[volumeIndex(2, 3, 4)]);
+    try testing.expectEqual(Block.dirt, vol[volumeIndex(32, 1, 31)]);
+
+    // +X border: x=33 holds the neighbour's x=0 layer.
+    try testing.expectEqual(Block.grass, vol[volumeIndex(33, 6, 10)]);
+    try testing.expectEqual(Block.air, vol[volumeIndex(33, 2, 2)]); // x=1 layer must not leak
+
+    // -X border: x=0 holds the neighbour's x=31 layer.
+    try testing.expectEqual(Block.dirt, vol[volumeIndex(0, 6, 10)]);
+    try testing.expectEqual(Block.air, vol[volumeIndex(0, 2, 2)]);
+
+    // +Y border: y=33 holds the neighbour's y=0 layer.
+    try testing.expectEqual(Block.water, vol[volumeIndex(6, 33, 10)]);
+    try testing.expectEqual(Block.air, vol[volumeIndex(2, 33, 2)]);
+
+    // -Y border: y=0 holds the neighbour's y=31 layer.
+    try testing.expectEqual(Block.log, vol[volumeIndex(6, 0, 10)]);
+    try testing.expectEqual(Block.air, vol[volumeIndex(2, 0, 2)]);
+
+    // +Z border: z=33 holds the neighbour's z=0 layer.
+    try testing.expectEqual(Block.leaves, vol[volumeIndex(6, 10, 33)]);
+    try testing.expectEqual(Block.air, vol[volumeIndex(2, 2, 33)]);
+
+    // -Z border: z=0 holds the neighbour's z=31 layer.
+    try testing.expectEqual(Block.stone, vol[volumeIndex(6, 10, 0)]);
+    try testing.expectEqual(Block.air, vol[volumeIndex(2, 2, 0)]);
+
+    // A null neighbour leaves its whole border plane air.
+    var vol2: Volume = undefined;
+    buildVolume(&center, .{ null, &nx, &py, &ny, &pz, &nz }, &vol2);
+    for (0..padded) |y| for (0..padded) |z| {
+        try testing.expectEqual(Block.air, vol2[volumeIndex(padded - 1, y, z)]);
+    };
+}
+
 test "greedy covers exactly the naive faces on random volumes" {
     const gpa = testing.allocator;
     var prng: std.Random.DefaultPrng = .init(0x5eed);
