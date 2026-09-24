@@ -73,6 +73,7 @@ chunk_layout: vk.PipelineLayout,
 cull_pipeline: vk.Pipeline,
 chunk_pipeline: vk.Pipeline,
 shadow_pipeline: vk.Pipeline,
+water_pipeline: vk.Pipeline,
 outline_layout: vk.PipelineLayout,
 outline_pipeline: vk.Pipeline,
 
@@ -80,7 +81,7 @@ pub fn init(gpa: Allocator, ctx: *const Context, extent: vk.Extent2D, options: O
     const d = ctx.device;
     var swapchain: Swapchain = try .init(ctx, gpa, extent, .null_handle);
     errdefer swapchain.deinit(ctx, gpa);
-    var depth: Image = try .initDepth(ctx, swapchain.extent, depth_format);
+    var depth: Image = try createDepth(ctx, swapchain.extent);
     errdefer depth.deinit(ctx);
 
     var frames: [frames_in_flight]Frame = undefined;
@@ -101,8 +102,12 @@ pub fn init(gpa: Allocator, ctx: *const Context, extent: vk.Extent2D, options: O
     errdefer draw_count.deinit(ctx);
 
     // The shadow map is bound with a push descriptor: no pool, no sets.
-    const binding: vk.DescriptorSetLayoutBinding = .{ .binding = 0, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true } };
-    const set_layout = try d.createDescriptorSetLayout(&.{ .flags = .{ .push_descriptor_bit = true }, .binding_count = 1, .p_bindings = @ptrCast(&binding) }, null);
+    // Binding 1: the scene depth, read in place by the water pass (input attachment).
+    const bindings = [_]vk.DescriptorSetLayoutBinding{
+        .{ .binding = 0, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true } },
+        .{ .binding = 1, .descriptor_type = .input_attachment, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true } },
+    };
+    const set_layout = try d.createDescriptorSetLayout(&.{ .flags = .{ .push_descriptor_bit = true }, .binding_count = bindings.len, .p_bindings = &bindings }, null);
     errdefer d.destroyDescriptorSetLayout(set_layout, null);
 
     const sky_layout = try pipeline.createLayout(ctx, @sizeOf(SkyPush), .{ .fragment_bit = true }, &.{});
@@ -142,6 +147,20 @@ pub fn init(gpa: Allocator, ctx: *const Context, extent: vk.Extent2D, options: O
         .depth_bias = true,
     });
     errdefer d.destroyPipeline(shadow_pipeline, null);
+    // Transparent water: blended over the opaque scene, depth-tested but not
+    // written, both sides visible (from under water too).
+    const water_pipeline = try pipeline.createGraphics(ctx, .{
+        .layout = chunk_layout,
+        .vertex = pipeline.spirv("chunk.vert"),
+        .fragment = pipeline.spirv("water.frag"),
+        .color_format = swapchain.format,
+        .depth_format = depth_format,
+        .depth_write = false,
+        .cull_back = false,
+        .blend = true,
+        .reads_depth = true,
+    });
+    errdefer d.destroyPipeline(water_pipeline, null);
     const outline_layout = try pipeline.createLayout(ctx, @sizeOf(OutlinePush), .{ .vertex_bit = true }, &.{});
     errdefer d.destroyPipelineLayout(outline_layout, null);
     const outline_pipeline = try pipeline.createGraphics(ctx, .{
@@ -173,6 +192,7 @@ pub fn init(gpa: Allocator, ctx: *const Context, extent: vk.Extent2D, options: O
         .cull_pipeline = cull_pipeline,
         .chunk_pipeline = chunk_pipeline,
         .shadow_pipeline = shadow_pipeline,
+        .water_pipeline = water_pipeline,
         .outline_layout = outline_layout,
         .outline_pipeline = outline_pipeline,
     };
@@ -183,6 +203,7 @@ pub fn deinit(self: *Renderer) void {
     d.deviceWaitIdle() catch {};
     d.destroyPipeline(self.outline_pipeline, null);
     d.destroyPipelineLayout(self.outline_layout, null);
+    d.destroyPipeline(self.water_pipeline, null);
     d.destroyPipeline(self.shadow_pipeline, null);
     d.destroyPipeline(self.chunk_pipeline, null);
     d.destroyPipeline(self.cull_pipeline, null);
@@ -316,7 +337,8 @@ pub fn drawFrame(self: *Renderer, extent: vk.Extent2D, in: FrameInput) !void {
     // 3. Main pass: sky, then chunks.
     const image = self.swapchain.images[image_index];
     imageBarrier(cmd, image, .{ .color_bit = true }, .undefined, .color_attachment_optimal, .{ .color_attachment_output_bit = true }, .{}, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true });
-    imageBarrier(cmd, self.depth.image, .{ .depth_bit = true }, .undefined, .depth_attachment_optimal, .{ .late_fragment_tests_bit = true }, .{ .depth_stencil_attachment_write_bit = true }, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true }, .{ .depth_stencil_attachment_write_bit = true, .depth_stencil_attachment_read_bit = true });
+    // The depth stays in RENDERING_LOCAL_READ for the whole pass: the water reads it in place.
+    imageBarrier(cmd, self.depth.image, .{ .depth_bit = true }, .undefined, .rendering_local_read, .{ .late_fragment_tests_bit = true, .fragment_shader_bit = true }, .{ .depth_stencil_attachment_write_bit = true }, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true, .fragment_shader_bit = true }, .{ .depth_stencil_attachment_write_bit = true, .depth_stencil_attachment_read_bit = true, .input_attachment_read_bit = true });
     const color_att: vk.RenderingAttachmentInfo = .{
         .image_view = self.swapchain.views[image_index],
         .image_layout = .color_attachment_optimal,
@@ -328,7 +350,7 @@ pub fn drawFrame(self: *Renderer, extent: vk.Extent2D, in: FrameInput) !void {
     };
     const depth_att: vk.RenderingAttachmentInfo = .{
         .image_view = self.depth.view,
-        .image_layout = .depth_attachment_optimal,
+        .image_layout = .rendering_local_read,
         .resolve_mode = .{},
         .resolve_image_layout = .undefined,
         .load_op = .clear,
@@ -352,7 +374,8 @@ pub fn drawFrame(self: *Renderer, extent: vk.Extent2D, in: FrameInput) !void {
     cmd.draw(3, 1, 0, 0);
 
     const shadow_info: vk.DescriptorImageInfo = .{ .sampler = self.shadows.sampler, .image_view = self.shadows.image.view, .image_layout = .depth_read_only_optimal };
-    cmd.pushDescriptorSet(.graphics, self.chunk_layout, 0, &.{.{
+    const depth_info: vk.DescriptorImageInfo = .{ .sampler = .null_handle, .image_view = self.depth.view, .image_layout = .rendering_local_read };
+    cmd.pushDescriptorSet(.graphics, self.chunk_layout, 0, &.{ .{
         .dst_set = .null_handle,
         .dst_binding = 0,
         .dst_array_element = 0,
@@ -361,15 +384,42 @@ pub fn drawFrame(self: *Renderer, extent: vk.Extent2D, in: FrameInput) !void {
         .p_image_info = @ptrCast(&shadow_info),
         .p_buffer_info = undefined,
         .p_texel_buffer_view = undefined,
-    }});
+    }, .{
+        .dst_set = .null_handle,
+        .dst_binding = 1,
+        .dst_array_element = 0,
+        .descriptor_count = 1,
+        .descriptor_type = .input_attachment,
+        .p_image_info = @ptrCast(&depth_info),
+        .p_buffer_info = undefined,
+        .p_texel_buffer_view = undefined,
+    } });
     cmd.bindPipeline(.graphics, self.chunk_pipeline);
     push.view = 0;
     cmd.pushConstants(self.chunk_layout, chunk_stages, 0, @sizeOf(gpu.Push), &push);
     cmd.drawIndirectCount(self.draws.handle, 0, self.draw_count.handle, 0, max_draws, @sizeOf(gpu.DrawCmd));
-    // Water groups, still drawn opaque with the chunk pipeline (transparency comes next).
+
+    // Water, inside the same pass: make this pass's depth writes visible to the
+    // water's in-place depth reads (by region: each pixel only reads itself).
+    const local_read: vk.ImageMemoryBarrier2 = .{
+        .src_stage_mask = .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true },
+        .src_access_mask = .{ .depth_stencil_attachment_write_bit = true },
+        .dst_stage_mask = .{ .fragment_shader_bit = true },
+        .dst_access_mask = .{ .input_attachment_read_bit = true },
+        .old_layout = .rendering_local_read,
+        .new_layout = .rendering_local_read,
+        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+        .image = self.depth.image,
+        .subresource_range = .{ .aspect_mask = .{ .depth_bit = true }, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 },
+    };
+    cmd.pipelineBarrier2(&.{ .dependency_flags = .{ .by_region_bit = true }, .image_memory_barrier_count = 1, .p_image_memory_barriers = @ptrCast(&local_read) });
+    cmd.setRenderingInputAttachmentIndices(&pipeline.depth_input_mapping);
+    cmd.bindPipeline(.graphics, self.water_pipeline);
     push.view = water_view;
     cmd.pushConstants(self.chunk_layout, chunk_stages, 0, @sizeOf(gpu.Push), &push);
     cmd.drawIndirectCount(self.draws.handle, water_view * max_draws * @sizeOf(gpu.DrawCmd), self.draw_count.handle, water_view * @sizeOf(u32), max_draws, @sizeOf(gpu.DrawCmd));
+    cmd.setRenderingInputAttachmentIndices(&pipeline.default_input_mapping);
 
     if (in.target) |t| {
         const outline: OutlinePush = .{ .view_proj = view_proj, .block = .{ @floatFromInt(t.x), @floatFromInt(t.y), @floatFromInt(t.z) } };
@@ -460,12 +510,17 @@ fn recreate(self: *Renderer, extent: vk.Extent2D) !void {
         else => return err,
     };
     errdefer swapchain.deinit(self.ctx, self.gpa);
-    const depth: Image = try .initDepth(self.ctx, swapchain.extent, depth_format);
+    const depth: Image = try createDepth(self.ctx, swapchain.extent);
     self.swapchain.deinit(self.ctx, self.gpa); // the old handle is retired, destroying it is valid
     self.depth.deinit(self.ctx);
     self.swapchain = swapchain;
     self.depth = depth;
     self.requested_extent = extent;
+}
+
+/// Scene depth: a depth attachment the water pass also reads as input attachment.
+fn createDepth(ctx: *const Context, extent: vk.Extent2D) !Image {
+    return .init(ctx, extent, depth_format, .{ .depth_stencil_attachment_bit = true, .input_attachment_bit = true }, .{ .depth_bit = true }, 1);
 }
 
 fn setViewport(cmd: vk.CommandBufferProxy, ext: vk.Extent2D) void {

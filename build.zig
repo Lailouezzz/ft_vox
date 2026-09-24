@@ -49,7 +49,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.linkLibrary(zglfw.artifact("glfw"));
 
     // Shaders: GLSL -> SPIR-V with glslc, embedded with @embedFile("<name>").
-    const shaders = [_][]const u8{ "fullscreen.vert", "sky.frag", "cull.comp", "chunk.vert", "chunk.frag", "shadow.vert", "outline.vert", "outline.frag" };
+    const shaders = [_][]const u8{ "fullscreen.vert", "sky.frag", "cull.comp", "chunk.vert", "chunk.frag", "shadow.vert", "outline.vert", "outline.frag", "water.frag" };
     for (shaders) |name| {
         const glslc = b.addSystemCommand(&.{ "glslc", "--target-env=vulkan1.4", "-O", "-o" });
         const spv = glslc.addOutputFileArg(b.fmt("{s}.spv", .{name}));
@@ -57,6 +57,7 @@ pub fn build(b: *std.Build) void {
         glslc.addFileInput(b.path("src/render/shaders/common.glsl"));
         glslc.addFileInput(b.path("src/render/shaders/gpu.glsl"));
         glslc.addFileInput(b.path("src/render/shaders/pull.glsl"));
+        glslc.addFileInput(b.path("src/render/shaders/lighting.glsl"));
         exe_mod.addAnonymousImport(name, .{ .root_source_file = spv });
     }
 

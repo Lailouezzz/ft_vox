@@ -22,7 +22,24 @@ pub const GraphicsDesc = struct {
     cull_back: bool = true,
     topology: vk.PrimitiveTopology = .triangle_list,
     depth_bias: bool = false,
+    /// Standard alpha blending (src alpha, 1 - src alpha) on the color attachment.
+    blend: bool = false,
+    /// Reads the depth attachment as input attachment 0 (dynamic rendering local read).
+    reads_depth: bool = false,
 };
+
+/// Input attachment mapping of a pipeline that reads the depth attachment:
+/// no color attachment is readable, depth is input attachment 0. Must match
+/// what `vkCmdSetRenderingInputAttachmentIndices` sets before drawing with it.
+pub const depth_input_indices = [_]u32{vk.ATTACHMENT_UNUSED};
+pub const depth_input_index: u32 = 0;
+pub const depth_input_mapping: vk.RenderingInputAttachmentIndexInfo = .{
+    .color_attachment_count = depth_input_indices.len,
+    .p_color_attachment_input_indices = &depth_input_indices,
+    .p_depth_input_attachment_index = &depth_input_index,
+};
+/// The default mapping (color i -> input i, depth not readable), restored after such draws.
+pub const default_input_mapping: vk.RenderingInputAttachmentIndexInfo = .{ .color_attachment_count = 1 };
 
 pub fn createGraphics(ctx: *const Context, d: GraphicsDesc) !vk.Pipeline {
     var modules: [2]vk.ShaderModuleCreateInfo = undefined;
@@ -36,6 +53,7 @@ pub fn createGraphics(ctx: *const Context, d: GraphicsDesc) !vk.Pipeline {
     }
     const color_formats: []const vk.Format = if (d.color_format) |*f| f[0..1] else &.{};
     const rendering: vk.PipelineRenderingCreateInfo = .{
+        .p_next = if (d.reads_depth) &depth_input_mapping else null,
         .view_mask = 0,
         .color_attachment_count = @intCast(color_formats.len),
         .p_color_attachment_formats = color_formats.ptr,
@@ -44,12 +62,12 @@ pub fn createGraphics(ctx: *const Context, d: GraphicsDesc) !vk.Pipeline {
     };
     const dynamic = [_]vk.DynamicState{ .viewport, .scissor, .depth_bias };
     const blend = vk.PipelineColorBlendAttachmentState{
-        .blend_enable = .false,
-        .src_color_blend_factor = .one,
-        .dst_color_blend_factor = .zero,
+        .blend_enable = if (d.blend) .true else .false,
+        .src_color_blend_factor = if (d.blend) .src_alpha else .one,
+        .dst_color_blend_factor = if (d.blend) .one_minus_src_alpha else .zero,
         .color_blend_op = .add,
         .src_alpha_blend_factor = .one,
-        .dst_alpha_blend_factor = .zero,
+        .dst_alpha_blend_factor = if (d.blend) .one_minus_src_alpha else .zero,
         .alpha_blend_op = .add,
         .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
     };
