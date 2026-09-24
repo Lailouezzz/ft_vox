@@ -124,6 +124,22 @@ fn pickPhysicalDevice(self: *Context, gpa: Allocator) !void {
             log.info("skipping {s}: missing feature {s}", .{ name, missing });
             continue;
         }
+        if (!try hasSwapchainExtension(self.instance, pdev, gpa)) {
+            log.info("skipping {s}: missing extension VK_KHR_swapchain", .{name});
+            continue;
+        }
+        const formats = try self.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(pdev, self.surface, gpa);
+        defer gpa.free(formats);
+        if (formats.len == 0) {
+            log.info("skipping {s}: no surface formats", .{name});
+            continue;
+        }
+        const present_modes = try self.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(pdev, self.surface, gpa);
+        defer gpa.free(present_modes);
+        if (present_modes.len == 0) {
+            log.info("skipping {s}: no surface present modes", .{name});
+            continue;
+        }
         const families = try self.instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(pdev, gpa);
         defer gpa.free(families);
         for (families, 0..) |fam, i| {
@@ -136,6 +152,14 @@ fn pickPhysicalDevice(self: *Context, gpa: Allocator) !void {
         }
     }
     return error.NoSuitableGpu;
+}
+
+fn hasSwapchainExtension(instance: vk.InstanceProxy, pdev: vk.PhysicalDevice, gpa: Allocator) !bool {
+    const extensions = try instance.enumerateDeviceExtensionPropertiesAlloc(pdev, null, gpa);
+    defer gpa.free(extensions);
+    const wanted = std.mem.sliceTo(vk.extensions.khr_swapchain.name, 0);
+    for (extensions) |ext| if (std.mem.eql(u8, std.mem.sliceTo(&ext.extension_name, 0), wanted)) return true;
+    return false;
 }
 
 fn missingFeature(instance: vk.InstanceProxy, pdev: vk.PhysicalDevice) ?[]const u8 {
