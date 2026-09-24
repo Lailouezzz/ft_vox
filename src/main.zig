@@ -110,12 +110,17 @@ pub fn main(init: std.process.Init) !void {
         const extent = framebufferExtent(window);
         if (extent.width == 0 or extent.height == 0) continue;
         const far: f32 = @floatFromInt(@as(u32, settings.radius) * world.chunk_size);
+        // keep in sync with pull.glsl's water_drop
+        const water_drop: f32 = 0.125;
+        const above_block: world.BlockPos = .{ .x = camera_block.x, .y = camera_block.y + 1, .z = camera_block.z };
+        const underwater = chunks.blockAt(camera_block) == .water and
+            (chunks.blockAt(above_block) == .water or camera.pos[1] < @as(f32, @floatFromInt(camera_block.y)) + 1 - water_drop);
         try renderer.drawFrame(extent, .{
             .camera = camera,
             .light = sun.lighting(),
             .shadows = sun.direction()[1] > 0.02,
             .target = if (target) |hit| hit.pos else null,
-            .underwater = chunks.blockAt(camera_block) == .water,
+            .underwater = underwater,
             .fog_start = far * 0.6,
             .fog_end = far * 0.95,
         });
