@@ -23,10 +23,11 @@ void main() {
     float dist = length(to_frag);
     vec3 view = -to_frag / dist;
 
-    // Reverse-Z infinite perspective: depth = near / view distance.
+    // Reverse-Z infinite perspective: depth = near / forward view distance.
     float near = pc.frame.fog.z;
     float floor_depth = max(subpassLoad(scene_depth).r, 1e-7);
     float thickness = max(near / floor_depth - near / gl_FragCoord.z, 0.0);
+    thickness *= dist * gl_FragCoord.z / near;
     float murk = 1.0 - exp(-thickness * absorption);
 
     float ndl = max(dot(n, sun), 0.0);
@@ -40,5 +41,6 @@ void main() {
     vec3 spec = pc.frame.sun_color.rgb * lit * pow(max(dot(reflect(-sun, n), view), 0.0), 256.0);
     vec3 color = mix(body, sky, fresnel) + spec;
     float alpha = clamp(mix(0.25, 0.95, murk) + fresnel, 0.0, 1.0);
+    alpha = clamp(alpha + dot(spec, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
     out_color = vec4(tonemap(applyFog(color, to_frag, dist)), alpha);
 }

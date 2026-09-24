@@ -40,10 +40,6 @@ pub fn init(ctx: *const Context, extent: vk.Extent2D, format: vk.Format, usage: 
     return .{ .image = image, .memory = memory, .view = view };
 }
 
-pub fn initDepth(ctx: *const Context, extent: vk.Extent2D, format: vk.Format) !Image {
-    return init(ctx, extent, format, .{ .depth_stencil_attachment_bit = true }, .{ .depth_bit = true }, 1);
-}
-
 pub fn deinit(self: *Image, ctx: *const Context) void {
     ctx.device.destroyImageView(self.view, null);
     ctx.device.destroyImage(self.image, null);

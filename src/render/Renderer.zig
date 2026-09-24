@@ -24,6 +24,9 @@ const depth_format: vk.Format = .d32_sfloat;
 const views = 1 + Shadows.cascades;
 /// Indirect range filled with the camera's water groups (after the culled views).
 const water_view = views;
+comptime {
+    if (water_view != 4) @compileError("cull.comp hard-codes water_view = 4");
+}
 /// Indirect ranges and counters: one per culled view, plus water.
 const regions = views + 1;
 const max_draws = ChunkBuffers.max_chunks * 6;
