@@ -58,6 +58,8 @@ Date : 2026-09-23 · Branche : `ai` · Zig 0.16.0
   - vérifications `comptime` des tailles et offsets des miroirs GPU ;
     format de surface sRGB préféré ; device sans `VK_KHR_swapchain` ou sans
     format/mode de présentation ignoré.
+- **r5 (2026-09-24)** — eau transparente (section « Eau transparente »,
+  jalons W1–W3) : l'eau sort du hors-périmètre.
 
 ## Objectif
 
@@ -67,7 +69,7 @@ binary greedy meshing sur deux `WorkerPool` (génération et maillage), rendu pi
 en un seul draw indirect, soleil avec cycle jour/nuit et cascaded shadow maps,
 casse de blocs avec remaillage regroupé.
 
-Hors périmètre : pose de blocs, transparence de l'eau, occlusion ambiante,
+Hors périmètre : pose de blocs, occlusion ambiante,
 texte à l'écran, collisions/physique, sauvegarde sur disque, shaders écrits
 en Zig (backend SPIR-V de Zig 0.16 insuffisant, testé).
 
@@ -325,6 +327,76 @@ Titre de fenêtre : FPS, chunks affichés, quads résidents sur le GPU,
 position.
 
 Contrôles : vol libre, ZQSD + souris, Shift pour accélérer, Échap quitte.
+
+## Eau transparente (r5)
+
+Rendu : eau transparente avec reflet du ciel (Fresnel), surface abaissée,
+vue sous l'eau, ombres reçues, opacité selon la profondeur. Hors
+périmètre : vagues, vrais reflets du terrain, tri des faces d'eau,
+simulation de fluide (l'eau reste statique, niveau de la mer fixe).
+
+Mesher :
+- 12 groupes de quads par chunk : 6 directions opaques puis 6 directions
+  d'eau, dans l'ordre de `Face` ; `Mesh.counts: [12]u32`.
+- En interne, deux types d'eau qui ne fusionnent pas : « surface » (bloc
+  d'eau dont le bloc au-dessus n'est pas de l'eau) et « profonde ». Les
+  quads d'eau de surface ont le bit 41 du quad à 1 (champ `surface` pris sur
+  le padding) ; le type émis reste `water`.
+- Le vertex shader abaisse de 1/8 de bloc le haut des quads marqués : toute
+  la face +Y, et l'arête haute des faces latérales. Les faces solides contre
+  l'eau étant émises, aucun trou n'apparaît sous la surface abaissée.
+
+Données GPU :
+- `ChunkMeta.counts: [12]u32` (68 octets) ; vérifications `comptime` mises
+  à jour.
+- `firstInstance = slot·16 + groupe` (0–5 opaque, 6–11 eau).
+- Culling caméra : groupes opaques dans la plage de la vue 0 (règle de
+  visibilité par face inchangée), groupes d'eau dans une 5e plage (vue
+  « eau », compteur 5) sans élimination par direction de face (l'eau se
+  voit aussi par dessous). Cascades : groupes d'eau ignorés (l'eau ne
+  projette pas d'ombre).
+
+Rendu (dynamic rendering local read, Vulkan 1.4, `dynamicRenderingLocalRead`) :
+- Une seule passe : ciel, chunks opaques, barrière par région à
+  l'intérieur du rendu (écritures de profondeur → lecture en input
+  attachment par le fragment shader), eau, contour du bloc visé.
+- L'image de profondeur a l'usage `input_attachment` et reste en layout
+  `RENDERING_LOCAL_READ` pendant la passe ; le pipeline de l'eau déclare la
+  profondeur comme input attachment (`RenderingInputAttachmentIndexInfo`)
+  et la lit avec `subpassLoad`.
+- Pipeline de l'eau : mélange alpha (src alpha / 1 - src alpha), test de
+  profondeur `GREATER_OR_EQUAL` sans écriture, pas de culling de faces.
+- `water.frag` : épaisseur d'eau = distance au fond (depth buffer,
+  linéarisée depuis le reverse-Z infini) - distance à la surface ; opacité
+  et teinte croissent avec l'épaisseur ; reflet du ciel pondéré par Fresnel
+  (Schlick, F0 = 0,02) ; reflet spéculaire du soleil ; ombres reçues. Le
+  calcul d'ombre et d'éclairage passe dans `lighting.glsl`, partagé avec
+  `chunk.frag`.
+- Repli si la validation refuse le local read : couper la passe, copier la
+  profondeur, relancer un rendu pour l'eau (révision de spec avant de le
+  faire).
+
+Sous l'eau : `main` interroge `ChunkManager.blockAt(position caméra)` et
+passe `underwater` au renderer ; brouillard bleu serré (fin à ~24 blocs) et
+teinte appliqués au ciel, aux chunks et à l'eau ; la surface vue par
+dessous utilise la normale retournée (`gl_FrontFacing`).
+
+Tests :
+- mesher : faces +Y d'eau marquées ; eau profonde non marquée ; surface et
+  profonde non fusionnées ; faces latérales du bloc de surface marquées ;
+  test de propriété (couverture = mesher naïf) inchangé.
+- GPU : `comptime` sur `ChunkMeta` (68 octets) et le nouvel encodage.
+- visuel (`xdotool` + captures) : lac vu d'en haut (fond visible près des
+  rives, plus sombre au large), vue rasante (reflet du ciel), caméra sous
+  l'eau (brouillard bleu), ombres des arbres sur l'eau ; validation sans
+  aucun message ; au moins 95 fps sur la scène de référence (106 avant).
+
+Jalons :
+- W1 : mesher (groupes d'eau, bit de surface) et données GPU (12 comptes,
+  5e plage) ; l'eau est encore dessinée opaque, surface abaissée visible.
+- W2 : passe transparente en local read, profondeur, Fresnel, ombres,
+  `lighting.glsl`.
+- W3 : vue sous l'eau.
 
 ## Gestion des erreurs
 
