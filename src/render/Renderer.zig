@@ -441,6 +441,11 @@ fn writeFrameData(self: *Renderer, frame: *Frame, in: FrameInput, view_proj: zm.
 /// current ones stay valid.
 fn recreate(self: *Renderer, extent: vk.Extent2D) !void {
     if (extent.width == 0 or extent.height == 0) return; // minimized
+    // deviceWaitIdle only waits on queue work, not the presentation engine: a
+    // per-image render_done semaphore the old swapchain owns could still be
+    // consumed by an in-flight present when it is destroyed below.
+    // VK_EXT_swapchain_maintenance1 (vkWaitForPresentKHR / per-present fences)
+    // would close that gap; not required here.
     try self.ctx.device.deviceWaitIdle();
     var swapchain = Swapchain.init(self.ctx, self.gpa, extent, self.swapchain.handle) catch |err| switch (err) {
         error.ZeroExtent => return, // minimized between the size query and now

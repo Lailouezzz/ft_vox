@@ -93,6 +93,14 @@ fn pickFormat(ctx: *const Context, gpa: Allocator) !vk.SurfaceFormatKHR {
     for (formats) |f| {
         if (f.format == .b8g8r8a8_srgb and f.color_space == .srgb_nonlinear_khr) return f;
     }
+    // Any other sRGB format still gets us gamma-correct output.
+    for (formats) |f| {
+        if (f.color_space != .srgb_nonlinear_khr) continue;
+        switch (f.format) {
+            .b8g8r8a8_srgb, .r8g8b8a8_srgb, .a8b8g8r8_srgb_pack32 => return f,
+            else => {},
+        }
+    }
     return formats[0];
 }
 
