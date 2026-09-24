@@ -36,6 +36,8 @@ pub fn main(init: std.process.Init) !void {
     const window = try glfw.Window.create(1280, 720, "ft_vox", null, null);
     defer window.destroy();
     try glfw.setInputMode(window, .cursor, .disabled);
+    // A click shorter than a frame would otherwise be lost: latch it until the next getMouseButton poll.
+    try glfw.setInputMode(window, .sticky_mouse_buttons, true);
 
     var ctx: Context = try .init(gpa, window);
     defer ctx.deinit(gpa);
@@ -43,6 +45,7 @@ pub fn main(init: std.process.Init) !void {
     defer renderer.deinit();
 
     // One core stays free for the render thread: oversubscribing starves it while loading.
+    // @max(2, ...): at least one worker per pool (gen + mesh).
     const workers = @max(2, (std.Thread.getCpuCount() catch 3) - 1);
     const mesh_workers = @max(1, workers / 3);
     const chunks = try ChunkManager.create(gpa, io, .{ .seed = settings.seed, .radius = settings.radius, .gen_workers = workers - mesh_workers, .mesh_workers = mesh_workers });
