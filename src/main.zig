@@ -7,6 +7,7 @@ const Renderer = @import("render/Renderer.zig");
 const Camera = @import("Camera.zig");
 const ChunkManager = @import("ChunkManager.zig");
 const Sun = @import("Sun.zig");
+const Settings = @import("Settings.zig");
 
 pub const std_options: std.Options = .{
     // Worker pool state changes are too chatty at debug level.
@@ -21,6 +22,12 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
 
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    const settings = Settings.parse(args[1..]) catch |err| {
+        std.debug.print("ft_vox: {t}\n{s}", .{ err, Settings.usage });
+        std.process.exit(2);
+    };
+
     try glfw.init();
     defer glfw.terminate();
     glfw.windowHint(.client_api, .no_api);
@@ -30,17 +37,17 @@ pub fn main(init: std.process.Init) !void {
 
     var ctx: Context = try .init(gpa, window);
     defer ctx.deinit(gpa);
-    var renderer: Renderer = try .init(gpa, &ctx, framebufferExtent(window), .{});
+    var renderer: Renderer = try .init(gpa, &ctx, framebufferExtent(window), .{ .shadow_resolution = settings.shadow_resolution });
     defer renderer.deinit();
 
     // One core stays free for the render thread: oversubscribing starves it while loading.
     const workers = @max(2, (std.Thread.getCpuCount() catch 3) - 1);
     const mesh_workers = @max(1, workers / 3);
-    const chunks = try ChunkManager.create(gpa, io, .{ .seed = 42, .gen_workers = workers - mesh_workers, .mesh_workers = mesh_workers });
+    const chunks = try ChunkManager.create(gpa, io, .{ .seed = settings.seed, .radius = settings.radius, .gen_workers = workers - mesh_workers, .mesh_workers = mesh_workers });
     defer chunks.destroy();
 
     var camera: Camera = .{};
-    var sun: Sun = .{};
+    var sun: Sun = .{ .day_length = settings.day_length };
     var last_cursor = window.getCursorPos();
     var last_time = glfw.getTime();
     var title_timer: f64 = 0;
@@ -87,7 +94,7 @@ pub fn main(init: std.process.Init) !void {
 
         const extent = framebufferExtent(window);
         if (extent.width == 0 or extent.height == 0) continue;
-        const far: f32 = @floatFromInt(@as(u32, 16) * world.chunk_size);
+        const far: f32 = @floatFromInt(@as(u32, settings.radius) * world.chunk_size);
         try renderer.drawFrame(extent, .{
             .camera = camera,
             .light = sun.lighting(),
@@ -126,4 +133,5 @@ test {
     _ = @import("Sun.zig");
     _ = @import("render/gpu.zig");
     _ = @import("render/Shadows.zig");
+    _ = @import("Settings.zig");
 }
