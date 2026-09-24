@@ -50,7 +50,14 @@ Date : 2026-09-23 · Branche : `ai` · Zig 0.16.0
     plus court qu'une frame ne soit pas perdu ;
   - culling des cascades sans plan proche (le depth clamp garde les
     obstacles entre le soleil et la cascade) ; `--day-length` refuse les
-    valeurs non finies.
+    valeurs non finies ;
+  - rayon maximal ramené à 24 chunks (marge sur les 16 384 slots et
+    16 M quads) ; buffer plein : log, le chunk reste non affiché jusqu'à son
+    rechargement ;
+  - `n = max(2, cœurs - 1)` workers (au moins un par pool) ;
+  - vérifications `comptime` des tailles et offsets des miroirs GPU ;
+    format de surface sRGB préféré ; device sans `VK_KHR_swapchain` ou sans
+    format/mode de présentation ignoré.
 
 ## Objectif
 
@@ -196,7 +203,7 @@ ChunkPos ─gen_in─► GenPool ─gen_out─► ChunkManager ─mesh_in─► 
   6 voisins générés, c'est le ChunkManager (thread principal) qui fait le
   lien.
 - Nombre de workers de chaque pool fourni par l'appelant via `Config`.
-  `main` en lance `n = cœurs - 1` au total (un cœur reste au rendu) :
+  `main` en lance `n = max(2, cœurs - 1)` au total (un cœur reste au rendu) :
   `mesh = max(1, n / 3)`, `gen = n - mesh`. Surdimensionner les deux pools
   affame le thread de rendu pendant le chargement (mesuré : 10 fps).
 - Résultats lus sans bloquer avec `pop()` sur `gen_out` et `mesh_out`.
@@ -309,12 +316,13 @@ visé (GLFW en mode « sticky mouse buttons » : un clic plus court qu'une
 frame n'est pas perdu) ; contour fil de fer : pipeline `line_list` de 24 sommets générés dans
 le vertex shader, légèrement agrandi, test de profondeur sans écriture.
 
-Réglages : `ft_vox [--seed N] [--radius 4..32] [--shadow-res 512..4096,
+Réglages : `ft_vox [--seed N] [--radius 4..24] [--shadow-res 512..4096,
 puissance de 2] [--day-length SECONDES]` ; valeurs par défaut pour iGPU
 (rayon 16, ombres 2048, journée de 240 s) ; une option invalide affiche
 l'usage et quitte avec le code 2.
 
-Titre de fenêtre : FPS, chunks chargés, quads dessinés.
+Titre de fenêtre : FPS, chunks affichés, quads résidents sur le GPU,
+position.
 
 Contrôles : vol libre, ZQSD + souris, Shift pour accélérer, Échap quitte.
 
@@ -322,7 +330,8 @@ Contrôles : vol libre, ZQSD + souris, Shift pour accélérer, Échap quitte.
 
 - Erreur Vulkan : remontée jusqu'à `main`, log, sortie propre.
 - `OUT_OF_DATE` / `SUBOPTIMAL` : recréation de la swapchain.
-- Buffer de quads plein : log, plus de nouveaux chunks chargés, pas de crash.
+- Buffer de quads ou slots pleins : log, le chunk reste non affiché jusqu'à
+  son rechargement, pas de crash (le rayon maximal de 24 garde une marge).
 - Erreur dans un worker (OOM) : log, le job est relancé plus tard.
 - Fermeture : `shutdown` de la GenPool puis de la MeshPool, les résultats
   restants sont libérés.
