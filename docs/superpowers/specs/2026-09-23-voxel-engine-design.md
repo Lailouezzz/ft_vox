@@ -178,8 +178,11 @@ Interfaces :
 - Sortie rangée par direction de face : 6 plages par chunk.
 - T-jonctions : là où un sommet d'un quad tombe au milieu de l'arête d'un
   quad voisin, les arrondis de rastérisation peuvent laisser un pixel non
-  couvert. Le vertex shader élargit chaque quad d'environ 1/1000 de bloc
-  sur ses deux axes ; le chevauchement est coplanaire et invisible.
+  couvert. Le vertex shader élargit chaque quad opaque d'environ 1/1000 de
+  bloc sur ses deux axes ; le chevauchement est coplanaire et invisible.
+  Les quads d'eau ne sont pas élargis : l'eau est mélangée sans écrire la
+  profondeur, un chevauchement serait mélangé deux fois (lignes visibles),
+  alors qu'une fissure ne laisse voir que le fond.
 - `zig build bench` : temps de maillage par chunk, cible < 200 µs en
   ReleaseFast.
 
@@ -376,10 +379,13 @@ Rendu (dynamic rendering local read, Vulkan 1.4, `dynamicRenderingLocalRead`) :
   profondeur, relancer un rendu pour l'eau (révision de spec avant de le
   faire).
 
-Sous l'eau : `main` interroge `ChunkManager.blockAt(position caméra)` et
-passe `underwater` au renderer ; brouillard bleu serré (fin à ~24 blocs) et
+Sous l'eau : `main` interroge `ChunkManager.blockAt(position caméra)` ; si
+ce bloc est de l'eau de surface (pas d'eau au-dessus), la caméra doit aussi
+être sous la surface abaissée (y < haut du bloc - 1/8). `underwater` est
+passé au renderer ; brouillard bleu serré (fin à ~24 blocs) et
 teinte appliqués au ciel, aux chunks et à l'eau ; la surface vue par
-dessous utilise la normale retournée (`gl_FrontFacing`).
+dessous utilise la normale retournée (`gl_FrontFacing`), et son épaisseur
+d'eau est la distance caméra-surface (ce qu'il y a derrière est de l'air).
 
 Tests :
 - mesher : faces +Y d'eau marquées ; eau profonde non marquée ; surface et
